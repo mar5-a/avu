@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videoseek"
+version = "0.1.0"
+description = "VideoSeek CLI and agent package"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  # Upstream "decord" ships no macOS arm64 wheel and no sdist; decord2 provides
+  # the same top-level `decord` module with arm64 wheels.
+  "decord2",
+  "litellm",
+  "numpy",
+  "pillow",
+  "pyyaml",
+  "python-dotenv",
+  "yt-dlp",
+]
+
+[project.scripts]
+"videoseek-cli" = "videoseek.cli:main"
+
+[tool.setuptools]
+packages = { find = { include = ["videoseek*", "config*"] } }

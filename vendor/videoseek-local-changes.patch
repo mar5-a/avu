@@ -1,0 +1,102 @@
+diff --git a/config/__init__.py b/config/__init__.py
+index 7b0965e..b31f02f 100644
+--- a/config/__init__.py
++++ b/config/__init__.py
+@@ -3,6 +3,8 @@ import yaml
+ import argparse
+ from pathlib import Path
+ 
++from dotenv import load_dotenv
++
+ 
+ def load_config(config_path: str) -> dict:
+     with open(config_path, "r", encoding="utf-8") as f:
+@@ -22,6 +24,15 @@ def init_config(config: dict, args: argparse.Namespace):
+ # General config
+ CONFIG_DIR = Path(__file__).resolve().parent
+ 
++# Load a .env from the nearest enclosing directory, walking up from this package
++# to the project root. load_dotenv does not override variables already set in the
++# shell, so an exported key still wins. Searching beats a fixed relative path here
++# because load_dotenv silently does nothing when the path is wrong.
++for _parent in (CONFIG_DIR, *CONFIG_DIR.parents):
++    if (_parent / ".env").is_file():
++        load_dotenv(_parent / ".env")
++        break
++
+ general_config = load_config(str(CONFIG_DIR / "general.yaml"))
+ 
+ prompts_config = load_config(str(CONFIG_DIR / "prompts.yaml"))
+\ No newline at end of file
+diff --git a/config/general.yaml b/config/general.yaml
+index cfc6e37..578ba5f 100644
+--- a/config/general.yaml
++++ b/config/general.yaml
+@@ -1,7 +1,9 @@
+-model_name: "gpt-5"
+-api_base: "OPENAI_API_BASE"
+-api_key: "OPENAI_API_KEY"
+-api_version: "OPENAI_API_VERSION"
++# LiteLLM routes by provider prefix; "gemini/" selects the Google AI Studio API.
++model_name: "gemini/gemini-3.8-flash"
++# These are the *names* of environment variables, resolved via os.getenv in config/__init__.py.
++api_base: "GEMINI_API_BASE"
++api_key: "GEMINI_API_KEY"
++api_version: "GEMINI_API_VERSION"
+ 
+ reasoning_effort: "medium"
+ seed: 42
+diff --git a/pyproject.toml b/pyproject.toml
+index 540238b..c09d3df 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,13 +9,15 @@ description = "VideoSeek CLI and agent package"
+ readme = "README.md"
+ requires-python = ">=3.10"
+ dependencies = [
+-  "decord",
++  # Upstream "decord" ships no macOS arm64 wheel and no sdist; decord2 provides
++  # the same top-level `decord` module with arm64 wheels.
++  "decord2",
+   "litellm",
+   "numpy",
+   "pillow",
+   "pyyaml",
++  "python-dotenv",
+   "yt-dlp",
+-  "openai-whisper",
+ ]
+ 
+ [project.scripts]
+diff --git a/videoseek/utils.py b/videoseek/utils.py
+index 2c38c13..5a43e85 100644
+--- a/videoseek/utils.py
++++ b/videoseek/utils.py
+@@ -70,14 +70,13 @@ def call_llm_api(
+     tool_choice: str = None,
+     return_json: bool = False,
+ ) -> dict:
+-    return completion(
++    params = dict(
+         model=model_name,
+         messages=messages,
+         api_base=api_base,
+         api_key=api_key,
+         api_version=api_version,
+         max_completion_tokens=max_tokens,
+-        seed=seed,
+         temperature=temperature,
+         reasoning_effort=reasoning_effort,
+         tools=tools,
+@@ -85,6 +84,11 @@ def call_llm_api(
+         response_format={"type": "json_object"} if return_json else None,
+         timeout=900,
+     )
++    # Gemini defines no `seed` parameter, and LiteLLM raises UnsupportedParamsError
++    # instead of ignoring it, so send it only to providers that accept it.
++    if not model_name.startswith("gemini/"):
++        params["seed"] = seed
++    return completion(**params)
+ 
+ 
+ def load_subtitles(subtitle_path: str):

@@ -1,0 +1,32 @@
+# Local environment
+.venv/
+
+# Secrets. API keys live in environment variables, never in the repo.
+.env
+*.env
+secrets*
+
+# Videos, subtitle files, image traces, and run outputs
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
+*.srt
+output/
+runs/
+data/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Held back from the public remote on purpose. Remove these lines to publish.
+# base-research.md names an unpublished collaboration; AGENTS.md is personal
+# working notes.
+base-research.md
+AGENTS.md

@@ -7,7 +7,12 @@ from decord import VideoReader
 from .core import Action, Observation, Trajectory, TrajectoryStep
 from .recorder import recorder
 from .tools import DEFAULT_TOOL_REGISTRY
-from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
+from .utils import (
+    call_llm_api,
+    convert_to_free_form_text_representation,
+    extract_thought,
+    load_subtitles,
+)
 
 
 class BaseAgent(ABC):
@@ -221,7 +226,7 @@ class VideoSeekAgent(BaseAgent):
                 seed=self.seed,
                 temperature=self.temperature,
             )
-            thought = response.choices[0].message.content
+            thought, thought_source = extract_thought(response)
             # thought = """I will use the `overview` tool next to get a 32-frame summary of the entire video, so I can (1) locate where the visit to TeamLab Planets happens in the timeline and (2) see what location appears immediately afterward. This will guide which narrower time segment to inspect with `skim` or `focus` in later steps."""
             self.messages.append({"role": "assistant", "content": thought})
             if self.verbose:
@@ -275,6 +280,7 @@ class VideoSeekAgent(BaseAgent):
                         thought=thought,
                         action=action,
                         observation=observation,
+                        thought_source=thought_source,
                     )
                 )
                 if action.function_name == "answer":
@@ -328,7 +334,9 @@ class VideoSeekAgent(BaseAgent):
                 seed=self.seed,
                 temperature=self.temperature,
             )
-            self.final_answer = response.choices[0].message.content
+            # Same fallback as the per-step thought: Gemini can answer with a
+            # function call rather than prose, leaving content empty.
+            self.final_answer, _ = extract_thought(response)
             self.messages.append({"role": "assistant", "content": self.final_answer})
             return Trajectory(
                 question=question,

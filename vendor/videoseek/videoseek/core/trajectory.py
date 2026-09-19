@@ -6,16 +6,20 @@ from .observation import Observation
 class TrajectoryStep:
     """A single step in the agent trajectory."""
 
-    def __init__(self, step_id: int, thought: str, action: Action, observation: Observation):
+    def __init__(self, step_id: int, thought: str, action: Action, observation: Observation,
+                 thought_source: str = None):
         self.step_id = step_id
         self.thought = thought
         self.action = action
         self.observation = observation
+        # "content", "reasoning_content" or "empty": where the thought came from.
+        self.thought_source = thought_source
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "step_id": self.step_id,
             "thought": self.thought,
+            "thought_source": self.thought_source,
             "action": self.action.to_dict(),
             "observation": str(self.observation),
         }

@@ -76,11 +76,41 @@ which emits single quotes and is therefore not valid JSON. OpenAI tolerated it;
 Gemini's converter rejects it when the history is replayed, which killed the first
 live attempt outright. Now `json.dumps`, verified against LiteLLM's converter.
 
-Still open, in order:
-1. Stop the empty thought. Either suppress the server-side tool or fall back to
-   `reasoning_content` when `content` is None.
-2. Decide whether `temperature` stays, given LiteLLM's removal warning.
-3. Then the 5-question and 20-question sets.
+**Run 2 (same question) — the loop is gone.** Six steps instead of ten, real
+reasoning at every step, and the agent used `focus` four times.
+
+| | run 1 (broken) | run 2 (fixed) |
+|---|---|---|
+| tool sequence | overview x9, answer | overview, focus x4, answer |
+| thoughts | empty at steps 1-9 | 735, 605, 315, ... chars |
+| steps | 10 | 6 |
+| images | 72, all overview | 72: 8 overview grids + 64 focus frames |
+| answer | A (correct) | A (correct) |
+| recorded cost | not captured | $0.1117, 18 calls, 115,319 in / 6,734 out |
+
+The fallback fired only at step 1 (`thought_source=reasoning_content`); steps 2-6
+produced ordinary text (`thought_source=content`). So the empty thought was
+self-perpetuating — once step 1 carried real reasoning into the conversation, the
+model answered in prose from then on.
+
+**Suppressing the phantom tool is not possible.** `tool_choice="none"` does emit
+`toolConfig.functionCallingConfig.mode=NONE`, but the model returns a tool call
+anyway, and the name differs each time (`video_intelligence:get_frame`,
+`sample_frames`, `video_toolbox:get_video_duration`). Those are not one registered
+tool it is invoking — it is inventing video-tool names it believes it has. Nothing
+executes, because we never grant the tool, so it never actually looked at frames on
+its own. The fallback is therefore the whole fix, not a workaround for part of it.
+
+**Usage capture is in.** Each run writes `usage.json` with call count, token totals
+(prompt, completion, reasoning) and a cost from LiteLLM's price table. Two caveats:
+the figure is LiteLLM's estimate, not Google's invoice — the AI Studio dashboard is
+authoritative — and LiteLLM prices `gemini-3.8-flash` at $0.75/1M in and $3.75/1M
+out, which may not match Google's published rate. Missing usage is counted as
+unknown rather than zero.
+
+Still open:
+1. Decide whether `temperature` stays, given LiteLLM's removal warning.
+2. Then the 5-question and 20-question sets.
 
 **Next:** step 3 — replay the saved images in a fresh request (experiment B).
 

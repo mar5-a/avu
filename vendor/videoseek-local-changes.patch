@@ -1,6 +1,6 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
 --- a/config/__init__.py	2026-09-19 16:32:46
-+++ b/config/__init__.py	2026-09-19 16:40:28
++++ b/config/__init__.py	2026-09-19 18:01:58
 @@ -3,7 +3,9 @@
  import argparse
  from pathlib import Path
@@ -29,7 +29,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
 --- a/config/general.yaml	2026-09-19 16:32:46
-+++ b/config/general.yaml	2026-09-19 16:40:28
++++ b/config/general.yaml	2026-09-19 18:01:58
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
 -api_base: "OPENAI_API_BASE"
@@ -46,7 +46,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  seed: 42
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
 --- a/pyproject.toml	2026-09-19 16:32:46
-+++ b/pyproject.toml	2026-09-19 16:40:28
++++ b/pyproject.toml	2026-09-19 18:01:58
 @@ -9,13 +9,15 @@
  readme = "README.md"
  requires-python = ">=3.10"
@@ -67,16 +67,33 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
 --- a/videoseek/agent.py	2026-09-19 16:32:46
-+++ b/videoseek/agent.py	2026-09-19 16:40:28
-@@ -5,6 +5,7 @@
++++ b/videoseek/agent.py	2026-09-19 18:01:58
+@@ -5,8 +5,14 @@
  from decord import VideoReader
  
  from .core import Action, Observation, Trajectory, TrajectoryStep
 +from .recorder import recorder
  from .tools import DEFAULT_TOOL_REGISTRY
- from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
+-from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
++from .utils import (
++    call_llm_api,
++    convert_to_free_form_text_representation,
++    extract_thought,
++    load_subtitles,
++)
  
-@@ -243,7 +244,9 @@
+ 
+ class BaseAgent(ABC):
+@@ -220,7 +226,7 @@
+                 seed=self.seed,
+                 temperature=self.temperature,
+             )
+-            thought = response.choices[0].message.content
++            thought, thought_source = extract_thought(response)
+             # thought = """I will use the `overview` tool next to get a 32-frame summary of the entire video, so I can (1) locate where the visit to TeamLab Planets happens in the timeline and (2) see what location appears immediately afterward. This will guide which narrower time segment to inspect with `skim` or `focus` in later steps."""
+             self.messages.append({"role": "assistant", "content": thought})
+             if self.verbose:
+@@ -243,7 +249,9 @@
                          "type": "function",
                          "function": {
                              "name": action.function_name,
@@ -87,7 +104,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                          },
                      }
                      for action in actions
-@@ -253,6 +256,7 @@
+@@ -253,6 +261,7 @@
              # OBSERVATIONS
              ############################################################
              for action in actions:
@@ -95,9 +112,28 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  try:
                      outcome = self.__exec_action(action)
                  except Exception as e:
+@@ -271,6 +280,7 @@
+                         thought=thought,
+                         action=action,
+                         observation=observation,
++                        thought_source=thought_source,
+                     )
+                 )
+                 if action.function_name == "answer":
+@@ -324,7 +334,9 @@
+                 seed=self.seed,
+                 temperature=self.temperature,
+             )
+-            self.final_answer = response.choices[0].message.content
++            # Same fallback as the per-step thought: Gemini can answer with a
++            # function call rather than prose, leaving content empty.
++            self.final_answer, _ = extract_thought(response)
+             self.messages.append({"role": "assistant", "content": self.final_answer})
+             return Trajectory(
+                 question=question,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
 --- a/videoseek/cli.py	2026-09-19 16:32:46
-+++ b/videoseek/cli.py	2026-09-19 16:40:28
++++ b/videoseek/cli.py	2026-09-19 18:01:58
 @@ -6,6 +6,7 @@
  
  from config import general_config, init_config, prompts_config
@@ -128,10 +164,35 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      traj_dict = traj.to_dict()
      prediction = traj_dict.get("final_answer", "")
  
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
+--- a/videoseek/core/trajectory.py	2026-09-19 16:32:46
++++ b/videoseek/core/trajectory.py	2026-09-19 18:01:58
+@@ -6,16 +6,20 @@
+ class TrajectoryStep:
+     """A single step in the agent trajectory."""
+ 
+-    def __init__(self, step_id: int, thought: str, action: Action, observation: Observation):
++    def __init__(self, step_id: int, thought: str, action: Action, observation: Observation,
++                 thought_source: str = None):
+         self.step_id = step_id
+         self.thought = thought
+         self.action = action
+         self.observation = observation
++        # "content", "reasoning_content" or "empty": where the thought came from.
++        self.thought_source = thought_source
+ 
+     def to_dict(self) -> Dict[str, Any]:
+         return {
+             "step_id": self.step_id,
+             "thought": self.thought,
++            "thought_source": self.thought_source,
+             "action": self.action.to_dict(),
+             "observation": str(self.observation),
+         }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-09-19 16:40:28
-@@ -0,0 +1,94 @@
++++ b/videoseek/recorder.py	2026-09-19 18:01:58
+@@ -0,0 +1,131 @@
 +"""Record the exact images a run sends to the model, so it can be replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
@@ -155,6 +216,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        self.run_dir = None
 +        self.images = []
 +        self.calls = []
++        self.usage = {}
 +        self._step = None
 +        self._tool = None
 +
@@ -168,6 +230,16 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        (self.run_dir / "images").mkdir(parents=True, exist_ok=True)
 +        self.images = []
 +        self.calls = []
++        self.usage = {
++            "calls": 0,
++            "calls_without_usage": 0,
++            "prompt_tokens": 0,
++            "completion_tokens": 0,
++            "reasoning_tokens": 0,
++            "total_tokens": 0,
++            "cost_usd": 0.0,
++            "cost_unavailable_calls": 0,
++        }
 +        self._step = None
 +        self._tool = None
 +
@@ -216,6 +288,29 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +                    {"step": self._step, "tool": self._tool, "blocks": blocks}
 +                )
 +
++    def record_usage(self, response):
++        """Accumulate token counts and cost from one model response."""
++        if not self.active:
++            return
++        usage = getattr(response, "usage", None)
++        if usage is None:
++            self.usage["calls_without_usage"] += 1
++            return
++        self.usage["calls"] += 1
++        self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
++        self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
++        self.usage["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
++        details = getattr(usage, "completion_tokens_details", None)
++        if details is not None:
++            self.usage["reasoning_tokens"] += getattr(details, "reasoning_tokens", 0) or 0
++        try:
++            import litellm
++
++            self.usage["cost_usd"] += litellm.completion_cost(completion_response=response)
++        except Exception:
++            # Unknown model or missing pricing: report tokens, don't invent a cost.
++            self.usage["cost_unavailable_calls"] += 1
++
 +    def write_manifest(self):
 +        if not self.active:
 +            return
@@ -223,12 +318,15 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        (self.run_dir / "images.json").write_text(
 +            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
 +        )
++        (self.run_dir / "usage.json").write_text(
++            json.dumps(self.usage, ensure_ascii=False, indent=2), encoding="utf-8"
++        )
 +
 +
 +recorder = ImageRecorder()
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
 --- a/videoseek/utils.py	2026-09-19 16:32:46
-+++ b/videoseek/utils.py	2026-09-19 16:40:28
++++ b/videoseek/utils.py	2026-09-19 18:01:58
 @@ -4,7 +4,9 @@
  import time
  from litellm import completion
@@ -264,7 +362,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=temperature,
          reasoning_effort=reasoning_effort,
          tools=tools,
-@@ -85,6 +86,21 @@
+@@ -85,6 +86,42 @@
          response_format={"type": "json_object"} if return_json else None,
          timeout=900,
      )
@@ -275,6 +373,25 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    return completion(**params)
 +
 +
++def extract_thought(response) -> tuple:
++    """Return the model's plan text, and whether it needed a fallback.
++
++    Gemini 3.8 answers VideoSeek's reasoning-only request with a function call
++    instead of prose: it proposes a video tool it was never granted, and the name
++    varies between calls (`video_intelligence:get_frame`, `sample_frames`, ...).
++    `.content` is then None and the plan sits in `.reasoning_content`. Without
++    this fallback the thought is empty, and the follow-up call that chooses a tool
++    from the thought has nothing to work from, so it defaults to `overview`.
++    """
++    message = response.choices[0].message
++    if message.content:
++        return message.content, "content"
++    reasoning = getattr(message, "reasoning_content", None)
++    if reasoning:
++        return reasoning, "reasoning_content"
++    return "", "empty"
++
++
 +def call_llm_api(*args, **kwargs) -> dict:
 +    """Single entry point: record the outgoing images, then call with retries.
 +
@@ -282,7 +399,9 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    appending the same images to the manifest a second time.
 +    """
 +    recorder.capture(kwargs.get("messages") or [])
-+    return _call_llm_api(*args, **kwargs)
++    response = _call_llm_api(*args, **kwargs)
++    recorder.record_usage(response)
++    return response
  
  
  def load_subtitles(subtitle_path: str):

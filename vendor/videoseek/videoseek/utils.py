@@ -93,6 +93,25 @@ def _call_llm_api(
     return completion(**params)
 
 
+def extract_thought(response) -> tuple:
+    """Return the model's plan text, and whether it needed a fallback.
+
+    Gemini 3.8 answers VideoSeek's reasoning-only request with a function call
+    instead of prose: it proposes a video tool it was never granted, and the name
+    varies between calls (`video_intelligence:get_frame`, `sample_frames`, ...).
+    `.content` is then None and the plan sits in `.reasoning_content`. Without
+    this fallback the thought is empty, and the follow-up call that chooses a tool
+    from the thought has nothing to work from, so it defaults to `overview`.
+    """
+    message = response.choices[0].message
+    if message.content:
+        return message.content, "content"
+    reasoning = getattr(message, "reasoning_content", None)
+    if reasoning:
+        return reasoning, "reasoning_content"
+    return "", "empty"
+
+
 def call_llm_api(*args, **kwargs) -> dict:
     """Single entry point: record the outgoing images, then call with retries.
 
@@ -100,7 +119,9 @@ def call_llm_api(*args, **kwargs) -> dict:
     appending the same images to the manifest a second time.
     """
     recorder.capture(kwargs.get("messages") or [])
-    return _call_llm_api(*args, **kwargs)
+    response = _call_llm_api(*args, **kwargs)
+    recorder.record_usage(response)
+    return response
 
 
 def load_subtitles(subtitle_path: str):

@@ -21,6 +21,7 @@ class ImageRecorder:
         self.run_dir = None
         self.images = []
         self.calls = []
+        self.usage = {}
         self._step = None
         self._tool = None
 
@@ -34,6 +35,16 @@ class ImageRecorder:
         (self.run_dir / "images").mkdir(parents=True, exist_ok=True)
         self.images = []
         self.calls = []
+        self.usage = {
+            "calls": 0,
+            "calls_without_usage": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+            "cost_usd": 0.0,
+            "cost_unavailable_calls": 0,
+        }
         self._step = None
         self._tool = None
 
@@ -82,12 +93,38 @@ class ImageRecorder:
                     {"step": self._step, "tool": self._tool, "blocks": blocks}
                 )
 
+    def record_usage(self, response):
+        """Accumulate token counts and cost from one model response."""
+        if not self.active:
+            return
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            self.usage["calls_without_usage"] += 1
+            return
+        self.usage["calls"] += 1
+        self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
+        self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
+        self.usage["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
+        details = getattr(usage, "completion_tokens_details", None)
+        if details is not None:
+            self.usage["reasoning_tokens"] += getattr(details, "reasoning_tokens", 0) or 0
+        try:
+            import litellm
+
+            self.usage["cost_usd"] += litellm.completion_cost(completion_response=response)
+        except Exception:
+            # Unknown model or missing pricing: report tokens, don't invent a cost.
+            self.usage["cost_unavailable_calls"] += 1
+
     def write_manifest(self):
         if not self.active:
             return
         payload = {"image_count": len(self.images), "images": self.images, "calls": self.calls}
         (self.run_dir / "images.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (self.run_dir / "usage.json").write_text(
+            json.dumps(self.usage, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
 

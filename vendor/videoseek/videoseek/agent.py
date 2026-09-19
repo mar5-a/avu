@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from decord import VideoReader
 
 from .core import Action, Observation, Trajectory, TrajectoryStep
+from .recorder import recorder
 from .tools import DEFAULT_TOOL_REGISTRY
 from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
 
@@ -253,6 +254,7 @@ class VideoSeekAgent(BaseAgent):
             # OBSERVATIONS
             ############################################################
             for action in actions:
+                recorder.set_context(step=step + 1, tool=action.function_name)
                 try:
                     outcome = self.__exec_action(action)
                 except Exception as e:

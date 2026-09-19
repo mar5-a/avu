@@ -4,6 +4,8 @@ import re
 import time
 from litellm import completion
 
+from .recorder import recorder
+
 
 def retry_with_exponential_backoff(
     func,
@@ -56,7 +58,7 @@ def retry_with_exponential_backoff(
 
 
 @retry_with_exponential_backoff
-def call_llm_api(
+def _call_llm_api(
     model_name: str,
     messages: list,
     api_base: str,
@@ -89,6 +91,16 @@ def call_llm_api(
     if not model_name.startswith("gemini/"):
         params["seed"] = seed
     return completion(**params)
+
+
+def call_llm_api(*args, **kwargs) -> dict:
+    """Single entry point: record the outgoing images, then call with retries.
+
+    Capturing here rather than inside the retried function keeps a retry from
+    appending the same images to the manifest a second time.
+    """
+    recorder.capture(kwargs.get("messages") or [])
+    return _call_llm_api(*args, **kwargs)
 
 
 def load_subtitles(subtitle_path: str):

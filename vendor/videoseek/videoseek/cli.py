@@ -6,6 +6,7 @@ from typing import Optional
 
 from config import general_config, init_config, prompts_config
 from .agent import VideoSeekAgent
+from .recorder import recorder
 
 
 def build_agent_config(args: argparse.Namespace) -> dict:
@@ -54,6 +55,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_dir = output_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    recorder.start(run_dir)
+
     # Run the agent
     agent = VideoSeekAgent(
         config=config,
@@ -63,7 +66,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         tools=config["tools"],
         verbose=args.verbose,
     )
-    traj = agent.run(args.user_query)
+    try:
+        traj = agent.run(args.user_query)
+    finally:
+        # Retain what the run saw even if it failed partway through.
+        recorder.write_manifest()
     traj_dict = traj.to_dict()
     prediction = traj_dict.get("final_answer", "")
 

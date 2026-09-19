@@ -1,20 +1,21 @@
-diff --git a/config/__init__.py b/config/__init__.py
-index 7b0965e..b31f02f 100644
---- a/config/__init__.py
-+++ b/config/__init__.py
-@@ -3,6 +3,8 @@ import yaml
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
+--- a/config/__init__.py	2026-09-19 16:32:46
++++ b/config/__init__.py	2026-09-19 16:32:46
+@@ -3,7 +3,9 @@
  import argparse
  from pathlib import Path
  
 +from dotenv import load_dotenv
-+
  
++
  def load_config(config_path: str) -> dict:
      with open(config_path, "r", encoding="utf-8") as f:
-@@ -22,6 +24,15 @@ def init_config(config: dict, args: argparse.Namespace):
+         return yaml.safe_load(f)
+@@ -21,6 +23,15 @@
+ 
  # General config
  CONFIG_DIR = Path(__file__).resolve().parent
- 
++
 +# Load a .env from the nearest enclosing directory, walking up from this package
 +# to the project root. load_dotenv does not override variables already set in the
 +# shell, so an exported key still wins. Searching beats a fixed relative path here
@@ -23,15 +24,12 @@ index 7b0965e..b31f02f 100644
 +    if (_parent / ".env").is_file():
 +        load_dotenv(_parent / ".env")
 +        break
-+
+ 
  general_config = load_config(str(CONFIG_DIR / "general.yaml"))
  
- prompts_config = load_config(str(CONFIG_DIR / "prompts.yaml"))
-\ No newline at end of file
-diff --git a/config/general.yaml b/config/general.yaml
-index cfc6e37..578ba5f 100644
---- a/config/general.yaml
-+++ b/config/general.yaml
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
+--- a/config/general.yaml	2026-09-19 16:32:46
++++ b/config/general.yaml	2026-09-19 16:32:46
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
 -api_base: "OPENAI_API_BASE"
@@ -46,11 +44,10 @@ index cfc6e37..578ba5f 100644
  
  reasoning_effort: "medium"
  seed: 42
-diff --git a/pyproject.toml b/pyproject.toml
-index 540238b..c09d3df 100644
---- a/pyproject.toml
-+++ b/pyproject.toml
-@@ -9,13 +9,15 @@ description = "VideoSeek CLI and agent package"
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml	2026-09-19 16:32:46
++++ b/pyproject.toml	2026-09-19 16:32:46
+@@ -9,13 +9,15 @@
  readme = "README.md"
  requires-python = ">=3.10"
  dependencies = [
@@ -68,11 +65,179 @@ index 540238b..c09d3df 100644
  ]
  
  [project.scripts]
-diff --git a/videoseek/utils.py b/videoseek/utils.py
-index 2c38c13..5a43e85 100644
---- a/videoseek/utils.py
-+++ b/videoseek/utils.py
-@@ -70,14 +70,13 @@ def call_llm_api(
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
+--- a/videoseek/agent.py	2026-09-19 16:32:46
++++ b/videoseek/agent.py	2026-09-19 16:32:46
+@@ -5,6 +5,7 @@
+ from decord import VideoReader
+ 
+ from .core import Action, Observation, Trajectory, TrajectoryStep
++from .recorder import recorder
+ from .tools import DEFAULT_TOOL_REGISTRY
+ from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
+ 
+@@ -253,6 +254,7 @@
+             # OBSERVATIONS
+             ############################################################
+             for action in actions:
++                recorder.set_context(step=step + 1, tool=action.function_name)
+                 try:
+                     outcome = self.__exec_action(action)
+                 except Exception as e:
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
+--- a/videoseek/cli.py	2026-09-19 16:32:46
++++ b/videoseek/cli.py	2026-09-19 16:32:46
+@@ -6,6 +6,7 @@
+ 
+ from config import general_config, init_config, prompts_config
+ from .agent import VideoSeekAgent
++from .recorder import recorder
+ 
+ 
+ def build_agent_config(args: argparse.Namespace) -> dict:
+@@ -54,6 +55,8 @@
+     run_dir = output_dir / run_id
+     run_dir.mkdir(parents=True, exist_ok=True)
+ 
++    recorder.start(run_dir)
++
+     # Run the agent
+     agent = VideoSeekAgent(
+         config=config,
+@@ -63,7 +66,11 @@
+         tools=config["tools"],
+         verbose=args.verbose,
+     )
+-    traj = agent.run(args.user_query)
++    try:
++        traj = agent.run(args.user_query)
++    finally:
++        # Retain what the run saw even if it failed partway through.
++        recorder.write_manifest()
+     traj_dict = traj.to_dict()
+     prediction = traj_dict.get("final_answer", "")
+ 
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
+--- a/videoseek/recorder.py	1970-01-01 03:00:00
++++ b/videoseek/recorder.py	2026-09-19 16:32:46
+@@ -0,0 +1,94 @@
++"""Record the exact images a run sends to the model, so it can be replayed.
++
++Every model call goes through `utils.call_llm_api`, which makes that the single
++place worth instrumenting: whatever content a tool builds, the bytes that
++actually left the process are captured here in order, each with the text block
++that immediately preceded it (its visible time label).
++
++The manifest keeps the full ordered block structure of every image-bearing call,
++not just the images, so a later request can be rebuilt without guessing at what
++surrounded them.
++"""
++
++import base64
++import hashlib
++import json
++from pathlib import Path
++
++
++class ImageRecorder:
++    def __init__(self):
++        self.run_dir = None
++        self.images = []
++        self.calls = []
++        self._step = None
++        self._tool = None
++
++    @property
++    def active(self):
++        return self.run_dir is not None
++
++    def start(self, run_dir):
++        """Begin recording into `run_dir`. Safe to call once per run."""
++        self.run_dir = Path(run_dir)
++        (self.run_dir / "images").mkdir(parents=True, exist_ok=True)
++        self.images = []
++        self.calls = []
++        self._step = None
++        self._tool = None
++
++    def set_context(self, step, tool):
++        """Attribute subsequent captures to one agent step and tool."""
++        self._step = step
++        self._tool = tool
++
++    def capture(self, messages):
++        """Save every image in `messages`, preserving order and labels."""
++        if not self.active:
++            return
++        for message in messages:
++            content = message.get("content")
++            if not isinstance(content, list):
++                continue
++            blocks = None
++            label = None
++            for block in content:
++                kind = block.get("type")
++                if kind == "text":
++                    label = block.get("text")
++                    if blocks is not None:
++                        blocks.append({"type": "text", "text": label})
++                elif kind == "image_url":
++                    raw = base64.b64decode(block["image_url"]["url"].partition(",")[2])
++                    index = len(self.images)
++                    name = f"{index:04d}_{self._tool or 'unknown'}.jpg"
++                    (self.run_dir / "images" / name).write_bytes(raw)
++                    self.images.append(
++                        {
++                            "index": index,
++                            "file": f"images/{name}",
++                            "step": self._step,
++                            "tool": self._tool,
++                            "label": label,
++                            "sha256": hashlib.sha256(raw).hexdigest(),
++                            "bytes": len(raw),
++                        }
++                    )
++                    if blocks is None:
++                        blocks = []
++                    blocks.append({"type": "image", "index": index})
++            if blocks is not None:
++                self.calls.append(
++                    {"step": self._step, "tool": self._tool, "blocks": blocks}
++                )
++
++    def write_manifest(self):
++        if not self.active:
++            return
++        payload = {"image_count": len(self.images), "images": self.images, "calls": self.calls}
++        (self.run_dir / "images.json").write_text(
++            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
++        )
++
++
++recorder = ImageRecorder()
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
+--- a/videoseek/utils.py	2026-09-19 16:32:46
++++ b/videoseek/utils.py	2026-09-19 16:32:46
+@@ -4,7 +4,9 @@
+ import time
+ from litellm import completion
+ 
++from .recorder import recorder
+ 
++
+ def retry_with_exponential_backoff(
+     func,
+     initial_delay: float = 1,
+@@ -56,7 +58,7 @@
+ 
+ 
+ @retry_with_exponential_backoff
+-def call_llm_api(
++def _call_llm_api(
+     model_name: str,
+     messages: list,
+     api_base: str,
+@@ -70,14 +72,13 @@
      tool_choice: str = None,
      return_json: bool = False,
  ) -> dict:
@@ -88,7 +253,7 @@ index 2c38c13..5a43e85 100644
          temperature=temperature,
          reasoning_effort=reasoning_effort,
          tools=tools,
-@@ -85,6 +84,11 @@ def call_llm_api(
+@@ -85,6 +86,21 @@
          response_format={"type": "json_object"} if return_json else None,
          timeout=900,
      )
@@ -97,6 +262,16 @@ index 2c38c13..5a43e85 100644
 +    if not model_name.startswith("gemini/"):
 +        params["seed"] = seed
 +    return completion(**params)
++
++
++def call_llm_api(*args, **kwargs) -> dict:
++    """Single entry point: record the outgoing images, then call with retries.
++
++    Capturing here rather than inside the retried function keeps a retry from
++    appending the same images to the manifest a second time.
++    """
++    recorder.capture(kwargs.get("messages") or [])
++    return _call_llm_api(*args, **kwargs)
  
  
  def load_subtitles(subtitle_path: str):

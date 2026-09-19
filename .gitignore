@@ -30,3 +30,6 @@ __pycache__/
 # working notes.
 base-research.md
 AGENTS.md
+
+# Obsidian vault: local working notes, not for the repo.
+notes/

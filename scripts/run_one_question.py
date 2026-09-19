@@ -71,30 +71,44 @@ def main() -> int:
     if args.max_steps is not None:
         argv += ["--max_steps", str(args.max_steps)]
 
-    rc = cli_main(argv)
+    before = set(args.output_dir.iterdir())
 
-    # cli.main names the run directory itself; the newest one is ours.
-    run_dir = max(args.output_dir.iterdir(), key=lambda p: p.stat().st_mtime)
-    (run_dir / "question.json").write_text(
-        json.dumps(
-            {
-                "note": "Answer key and evidence. Never sent to the model.",
-                "id": row["id"],
-                "task": row["task"],
-                "dataset": row["dataset"],
-                "source_question_id": row["source_question_id"],
-                "video_id": row["video_id"],
-                "question": row["question"],
-                "options": row["options"],
-                "answer": row["answer"],
-                "evidence": row["evidence"],
-                "query_sent_to_model": query,
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    def write_answer_key():
+        """Write the answer key even when the run fails.
+
+        cli.main names the run directory itself, so this identifies the directory
+        this run created rather than assuming the newest one.
+        """
+        created = [p for p in args.output_dir.iterdir() if p not in before and p.is_dir()]
+        if not created:
+            return None
+        run_dir = max(created, key=lambda p: p.stat().st_mtime)
+        (run_dir / "question.json").write_text(
+            json.dumps(
+                {
+                    "note": "Answer key and evidence. Never sent to the model.",
+                    "id": row["id"],
+                    "task": row["task"],
+                    "dataset": row["dataset"],
+                    "source_question_id": row["source_question_id"],
+                    "video_id": row["video_id"],
+                    "question": row["question"],
+                    "options": row["options"],
+                    "answer": row["answer"],
+                    "evidence": row["evidence"],
+                    "query_sent_to_model": query,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return run_dir
+
+    try:
+        rc = cli_main(argv)
+    finally:
+        run_dir = write_answer_key()
     print("-" * 70)
     print(f"run dir: {run_dir}")
     return rc

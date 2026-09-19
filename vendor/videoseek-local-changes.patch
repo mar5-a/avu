@@ -1,6 +1,6 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
 --- a/config/__init__.py	2026-09-19 16:32:46
-+++ b/config/__init__.py	2026-09-19 18:01:58
++++ b/config/__init__.py	2026-09-19 18:52:01
 @@ -3,7 +3,9 @@
  import argparse
  from pathlib import Path
@@ -29,7 +29,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
 --- a/config/general.yaml	2026-09-19 16:32:46
-+++ b/config/general.yaml	2026-09-19 18:01:58
++++ b/config/general.yaml	2026-09-19 18:52:01
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
 -api_base: "OPENAI_API_BASE"
@@ -46,7 +46,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  seed: 42
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
 --- a/pyproject.toml	2026-09-19 16:32:46
-+++ b/pyproject.toml	2026-09-19 18:01:58
++++ b/pyproject.toml	2026-09-19 18:52:01
 @@ -9,13 +9,15 @@
  readme = "README.md"
  requires-python = ">=3.10"
@@ -67,7 +67,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
 --- a/videoseek/agent.py	2026-09-19 16:32:46
-+++ b/videoseek/agent.py	2026-09-19 18:01:58
++++ b/videoseek/agent.py	2026-09-19 18:52:01
 @@ -5,8 +5,14 @@
  from decord import VideoReader
  
@@ -133,7 +133,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  question=question,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
 --- a/videoseek/cli.py	2026-09-19 16:32:46
-+++ b/videoseek/cli.py	2026-09-19 18:01:58
++++ b/videoseek/cli.py	2026-09-19 18:52:01
 @@ -6,6 +6,7 @@
  
  from config import general_config, init_config, prompts_config
@@ -142,16 +142,17 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
  
  def build_agent_config(args: argparse.Namespace) -> dict:
-@@ -54,6 +55,8 @@
+@@ -54,6 +55,9 @@
      run_dir = output_dir / run_id
      run_dir.mkdir(parents=True, exist_ok=True)
  
 +    recorder.start(run_dir)
++    recorder.record_settings(config)
 +
      # Run the agent
      agent = VideoSeekAgent(
          config=config,
-@@ -63,7 +66,11 @@
+@@ -63,7 +67,11 @@
          tools=config["tools"],
          verbose=args.verbose,
      )
@@ -166,7 +167,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
 --- a/videoseek/core/trajectory.py	2026-09-19 16:32:46
-+++ b/videoseek/core/trajectory.py	2026-09-19 18:01:58
++++ b/videoseek/core/trajectory.py	2026-09-19 18:52:01
 @@ -6,16 +6,20 @@
  class TrajectoryStep:
      """A single step in the agent trajectory."""
@@ -191,8 +192,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-09-19 18:01:58
-@@ -0,0 +1,131 @@
++++ b/videoseek/recorder.py	2026-09-19 18:52:01
+@@ -0,0 +1,158 @@
 +"""Record the exact images a run sends to the model, so it can be replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
@@ -217,6 +218,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        self.images = []
 +        self.calls = []
 +        self.usage = {}
++        self.settings = {}
 +        self._step = None
 +        self._tool = None
 +
@@ -311,6 +313,29 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            # Unknown model or missing pricing: report tokens, don't invent a cost.
 +            self.usage["cost_unavailable_calls"] += 1
 +
++    def record_settings(self, config):
++        """Save the settings a run used, so two runs can be compared.
++
++        The API key is never written — only whether one was present. The system
++        prompt is stored as a digest rather than text, which is enough to tell
++        whether it changed between runs without duplicating it per run.
++        """
++        if not self.active:
++            return
++        keys = (
++            "model_name", "temperature", "reasoning_effort", "max_steps",
++            "max_tokens", "max_retries", "seed", "frame_sampling_factor",
++            "overview_base", "skim_base", "focus_base", "tools",
++            "api_base", "api_version",
++        )
++        prompt = config.get("SYSTEM_PROMPT") or ""
++        self.settings = {key: config.get(key) for key in keys}
++        self.settings["api_key_present"] = config.get("api_key") is not None
++        self.settings["system_prompt_sha256"] = hashlib.sha256(
++            prompt.encode("utf-8")
++        ).hexdigest()
++        self.settings["system_prompt_chars"] = len(prompt)
++
 +    def write_manifest(self):
 +        if not self.active:
 +            return
@@ -321,12 +346,15 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        (self.run_dir / "usage.json").write_text(
 +            json.dumps(self.usage, ensure_ascii=False, indent=2), encoding="utf-8"
 +        )
++        (self.run_dir / "settings.json").write_text(
++            json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8"
++        )
 +
 +
 +recorder = ImageRecorder()
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
 --- a/videoseek/utils.py	2026-09-19 16:32:46
-+++ b/videoseek/utils.py	2026-09-19 18:01:58
++++ b/videoseek/utils.py	2026-09-19 18:52:01
 @@ -4,7 +4,9 @@
  import time
  from litellm import completion

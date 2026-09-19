@@ -22,6 +22,7 @@ class ImageRecorder:
         self.images = []
         self.calls = []
         self.usage = {}
+        self.settings = {}
         self._step = None
         self._tool = None
 
@@ -116,6 +117,29 @@ class ImageRecorder:
             # Unknown model or missing pricing: report tokens, don't invent a cost.
             self.usage["cost_unavailable_calls"] += 1
 
+    def record_settings(self, config):
+        """Save the settings a run used, so two runs can be compared.
+
+        The API key is never written — only whether one was present. The system
+        prompt is stored as a digest rather than text, which is enough to tell
+        whether it changed between runs without duplicating it per run.
+        """
+        if not self.active:
+            return
+        keys = (
+            "model_name", "temperature", "reasoning_effort", "max_steps",
+            "max_tokens", "max_retries", "seed", "frame_sampling_factor",
+            "overview_base", "skim_base", "focus_base", "tools",
+            "api_base", "api_version",
+        )
+        prompt = config.get("SYSTEM_PROMPT") or ""
+        self.settings = {key: config.get(key) for key in keys}
+        self.settings["api_key_present"] = config.get("api_key") is not None
+        self.settings["system_prompt_sha256"] = hashlib.sha256(
+            prompt.encode("utf-8")
+        ).hexdigest()
+        self.settings["system_prompt_chars"] = len(prompt)
+
     def write_manifest(self):
         if not self.active:
             return
@@ -125,6 +149,9 @@ class ImageRecorder:
         )
         (self.run_dir / "usage.json").write_text(
             json.dumps(self.usage, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (self.run_dir / "settings.json").write_text(
+            json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
 

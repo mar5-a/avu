@@ -56,6 +56,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     recorder.start(run_dir)
+    recorder.record_settings(config)
 
     # Run the agent
     agent = VideoSeekAgent(

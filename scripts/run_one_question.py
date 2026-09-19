@@ -11,6 +11,7 @@ Usage:
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -37,6 +38,19 @@ def build_query(row: dict) -> str:
         "Please directly answer with the best option's letter from the given "
         "choices directly (A, B, C, or D)."
     )
+
+
+def run_name(row: dict) -> str:
+    """A readable run directory name: `q257-temporal-ordering-2026-09-19`."""
+    return f"q{row['id']}-{row['task'].replace('_', '-')}-{time.strftime('%Y-%m-%d')}"
+
+
+def unique_run_dir(output_dir: Path, row: dict) -> Path:
+    """The run name, suffixed if a run of the same question already exists today."""
+    base, name, n = run_name(row), run_name(row), 2
+    while (output_dir / name).exists():
+        name, n = f"{base}-{n}", n + 1
+    return output_dir / name
 
 
 def main() -> int:
@@ -73,16 +87,20 @@ def main() -> int:
 
     before = set(args.output_dir.iterdir())
 
-    def write_answer_key():
-        """Write the answer key even when the run fails.
+    def finalize_run():
+        """Rename the run to something readable, then write the answer key.
 
-        cli.main names the run directory itself, so this identifies the directory
-        this run created rather than assuming the newest one.
+        cli.main names its own directory `<video_id>_<unix_ts>`, which is opaque and
+        doesn't identify the question — one video can carry several. Renaming here
+        leaves upstream untouched, and doing it in a finally keeps a failed run
+        findable by name. The directory this run created is found by diffing the
+        output dir, so a concurrent run can't be mistaken for it.
         """
         created = [p for p in args.output_dir.iterdir() if p not in before and p.is_dir()]
         if not created:
             return None
         run_dir = max(created, key=lambda p: p.stat().st_mtime)
+        run_dir = run_dir.rename(unique_run_dir(args.output_dir, row))
         (run_dir / "question.json").write_text(
             json.dumps(
                 {
@@ -108,7 +126,7 @@ def main() -> int:
     try:
         rc = cli_main(argv)
     finally:
-        run_dir = write_answer_key()
+        run_dir = finalize_run()
     print("-" * 70)
     print(f"run dir: {run_dir}")
     return rc

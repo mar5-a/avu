@@ -244,7 +244,9 @@ class VideoSeekAgent(BaseAgent):
                         "type": "function",
                         "function": {
                             "name": action.function_name,
-                            "arguments": str(action.parameters),
+                            # Must be valid JSON: str(dict) emits single quotes, which
+                            # Gemini's message converter rejects when the history is replayed.
+                            "arguments": json.dumps(action.parameters),
                         },
                     }
                     for action in actions

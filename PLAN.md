@@ -54,7 +54,35 @@ exercised against the live API; no research runs yet.
   already exported in the shell still wins. `.env` holds the local key and is
   gitignored; `.env.example` is the committed template. `python-dotenv` is now a
   declared dependency rather than borrowed from LiteLLM's dependency tree.
-- **Next:** step 2 — one development question from VES-Bench and its video.
+**Run 1 (question 257, `temporal_ordering`, 80.7s video) — answered A, ground truth A.**
+
+**The answer is correct, but the run is not a valid baseline.** The agent called
+`overview` at all nine steps and never once called `skim` or `focus`, the tools
+meant for localizing and inspecting evidence. Steps 1-9 produced no thought text
+at all; only step 10 contained reasoning. So it re-read the whole video nine times
+and answered correctly from that, rather than by seeking evidence.
+
+Root cause, established with one minimal call: **the reasoning call returns
+`content=None`.** Gemini 3.8 Flash answers a video-understanding prompt by invoking
+`video_intelligence:get_frame` — a Google-side server tool that appears nowhere in
+LiteLLM and that VideoSeek never passes. It comes back as a `tool_calls` response
+with `finish_reason="tool_calls"` and the model's actual reasoning in
+`reasoning_content`. VideoSeek reads only `.content`, so its thought is empty, and
+the follow-up action-selection call then has nothing to work from and picks
+`overview` by default. Fixing this is the prerequisite for a meaningful run.
+
+Bug #1, fixed: `agent.py` serialized tool arguments with `str(action.parameters)`,
+which emits single quotes and is therefore not valid JSON. OpenAI tolerated it;
+Gemini's converter rejects it when the history is replayed, which killed the first
+live attempt outright. Now `json.dumps`, verified against LiteLLM's converter.
+
+Still open, in order:
+1. Stop the empty thought. Either suppress the server-side tool or fall back to
+   `reasoning_content` when `content` is None.
+2. Decide whether `temperature` stays, given LiteLLM's removal warning.
+3. Then the 5-question and 20-question sets.
+
+**Next:** step 3 — replay the saved images in a fresh request (experiment B).
 
 ## 1. Get the existing agent ready
 

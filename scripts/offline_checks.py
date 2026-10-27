@@ -283,6 +283,39 @@ def check_call_failure_is_recorded(tmp):
     assert events and events[-1]["status"] == "failed"
 
 
+def check_high_demand_is_retried(tmp):
+    """Gemini's 503 "high demand" is retried, not turned into a failed tool."""
+    recorder.start(tmp)
+    # The message a smoke-test run got on 2026-10-27, which upstream did not retry.
+    overloaded = litellm.ServiceUnavailableError(
+        message='GeminiException - {"error": {"code": 503, "message": "This model is currently '
+        'experiencing high demand. Spikes in demand are usually temporary. Please try again '
+        'later.", "status": "UNAVAILABLE"}}',
+        llm_provider="gemini",
+        model="gemini/gemini-3.8-flash",
+    )
+    outcomes = [overloaded]
+
+    def busy_once(*args, **kwargs):
+        if outcomes:
+            raise outcomes.pop()
+        return fake_response(content="fine", usage=fake_usage())
+
+    with patch_attr(utils, "completion", busy_once), patch_attr(utils.time, "sleep", lambda s: None):
+        response = call_llm_api(
+            model_name="gemini/gemini-3.8-flash", api_base=None,
+            messages=[{"role": "user", "content": "hi"}],
+        )
+    assert response is not None, "a 503 still ends the call"
+    attempts = [e for e in read_events(tmp) if e["kind"] == "attempt"]
+    assert [e["status"] for e in attempts] == ["retry"], attempts
+    assert attempts[0]["error_type"] == "ServiceUnavailableError", attempts[0]
+    recorder.write_manifest()
+    usage = json.loads((Path(tmp) / "usage.json").read_text())
+    assert usage["calls"] == 1 and usage["calls_failed"] == 0, usage
+    return "one 503, one retry, then the answer"
+
+
 def check_crash_keeps_transcript(tmp):
     """A run that dies mid-flight still leaves a readable, partial record.
 
@@ -1240,6 +1273,7 @@ CHECKS = (
     ("usage accounting", check_usage_unknown_is_not_zero),
     ("failure recording", check_failure_recording),
     ("call failure recorded", check_call_failure_is_recorded),
+    ("high demand is retried", check_high_demand_is_retried),
     ("crash keeps transcript", check_crash_keeps_transcript),
     ("provenance identifies frames", check_provenance_identifies_frames),
     ("end-to-end scripted run", check_end_to_end_run),

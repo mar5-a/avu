@@ -37,6 +37,10 @@ def retry_with_exponential_backoff(
                     or "server had an error" in str(e).lower()
                     or "has no attribute 'upper'" in str(e).lower()
                     or "internal" in str(e).lower()
+                    # Gemini's 503 "model is currently experiencing high demand"
+                    # (status UNAVAILABLE): upstream gave up at once, the tool
+                    # crashed on the None, and the run carried on without it.
+                    or "unavailable" in str(e).lower()
                 ):
                     # Increment retries
                     num_retries += 1

@@ -1,6 +1,6 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
---- a/config/__init__.py	2026-09-21 02:23:15
-+++ b/config/__init__.py	2026-09-21 02:23:15
+--- a/config/__init__.py	2026-10-27 22:28:50
++++ b/config/__init__.py	2026-09-19 16:03:40
 @@ -3,7 +3,9 @@
  import argparse
  from pathlib import Path
@@ -28,8 +28,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  general_config = load_config(str(CONFIG_DIR / "general.yaml"))
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
---- a/config/general.yaml	2026-09-21 02:23:15
-+++ b/config/general.yaml	2026-09-21 02:23:15
+--- a/config/general.yaml	2026-10-27 22:28:50
++++ b/config/general.yaml	2026-10-27 22:31:47
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
 -api_base: "OPENAI_API_BASE"
@@ -44,17 +44,27 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  
  reasoning_effort: "medium"
  seed: 42
+@@ -9,6 +11,9 @@
+ max_steps: 20
+ max_retries: 8
+ max_tokens: 32768
++# A runaway guard, not a budget: a run stops before its next call once LiteLLM's
++# cost estimate reaches this. The pilot's priciest ordering run cost $0.17.
++max_run_cost_usd: 1.0
+ 
+ frame_sampling_factor: 4
+ overview_base: 16
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml	2026-09-21 02:23:15
-+++ b/pyproject.toml	2026-09-21 02:23:15
+--- a/pyproject.toml	2026-10-27 22:28:50
++++ b/pyproject.toml	2026-10-27 23:13:20
 @@ -9,13 +9,15 @@
  readme = "README.md"
  requires-python = ">=3.10"
  dependencies = [
 -  "decord",
-+  # Upstream "decord" ships no macOS arm64 wheel and no sdist; decord2 provides
-+  # the same top-level `decord` module with arm64 wheels.
-+  "decord2",
++  # Replaces upstream's decord, whose seek can return the wrong frame; see
++  # videoseek/video.py.
++  "av",
    "litellm",
    "numpy",
    "pillow",
@@ -66,13 +76,16 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
---- a/videoseek/agent.py	2026-09-21 02:23:15
-+++ b/videoseek/agent.py	2026-09-21 02:23:15
-@@ -5,8 +5,14 @@
- from decord import VideoReader
+--- a/videoseek/agent.py	2026-10-27 22:28:50
++++ b/videoseek/agent.py	2026-10-27 23:13:16
+@@ -2,11 +2,17 @@
+ from typing import List
+ from abc import ABC, abstractmethod
  
+-from decord import VideoReader
+-
  from .core import Action, Observation, Trajectory, TrajectoryStep
-+from .recorder import recorder
++from .recorder import RunBudgetExceeded, recorder
  from .tools import DEFAULT_TOOL_REGISTRY
 -from .utils import call_llm_api, convert_to_free_form_text_representation, load_subtitles
 +from .utils import (
@@ -81,10 +94,51 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    extract_thought,
 +    load_subtitles,
 +)
++# Not decord's: its seek can silently return a frame seconds early; see video.py.
++from .video import VideoReader
  
  
  class BaseAgent(ABC):
-@@ -220,7 +226,7 @@
+@@ -38,10 +44,14 @@
+         output_dir: str,
+         tools: list,
+         verbose: bool = False,
++        question_context: str = None,
+     ):
+         super().__init__()
+         self.config = config
+         self.video_path = video_path
++        # Shown to the skim and focus workers beside the planner's query; see
++        # `utils.question_context_block`. None keeps upstream's query-only prompt.
++        self.question_context = question_context
+         self.vr = VideoReader(video_path)
+         self.tool_registry = DEFAULT_TOOL_REGISTRY
+         self.tools = self.tool_registry.resolve_tools(tools + ["answer"])
+@@ -131,6 +141,8 @@
+                             function_id=function_id,
+                         )
+                     )
++        except RunBudgetExceeded:
++            raise
+         except Exception as e:
+             print(f"Error parsing actions: {e}")
+             return []
+@@ -150,7 +162,13 @@
+         if function_name == "answer":
+             parameters = {"question": self.question, "messages": self.messages}
+         else:
+-            parameters.update({"vr": self.vr, "subtitles": self.subtitles})
++            parameters.update(
++                {
++                    "vr": self.vr,
++                    "subtitles": self.subtitles,
++                    "question_context": self.question_context,
++                }
++            )
+         
+         if self.tool_registry.has_tool(function_name):
+             outcome = self.tool_registry.get_function(function_name)(
+@@ -220,7 +238,7 @@
                  seed=self.seed,
                  temperature=self.temperature,
              )
@@ -93,7 +147,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              # thought = """I will use the `overview` tool next to get a 32-frame summary of the entire video, so I can (1) locate where the visit to TeamLab Planets happens in the timeline and (2) see what location appears immediately afterward. This will guide which narrower time segment to inspect with `skim` or `focus` in later steps."""
              self.messages.append({"role": "assistant", "content": thought})
              if self.verbose:
-@@ -243,7 +249,9 @@
+@@ -243,7 +261,9 @@
                          "type": "function",
                          "function": {
                              "name": action.function_name,
@@ -104,13 +158,17 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                          },
                      }
                      for action in actions
-@@ -253,10 +261,19 @@
+@@ -253,10 +273,23 @@
              # OBSERVATIONS
              ############################################################
              for action in actions:
 +                recorder.set_context(step=step + 1, tool=action.function_name)
                  try:
                      outcome = self.__exec_action(action)
++                except RunBudgetExceeded:
++                    # The run is over, not the tool: recorded as a failed tool it
++                    # would read as evidence the agent chose to do without.
++                    raise
                  except Exception as e:
 -                    outcome = "Tool execution failed."
 +                    # "Tool execution failed." alone reads the same whether the
@@ -125,7 +183,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  if self.verbose:
                      print(f"[STEP {step+1} / {self.max_steps}] OBSERVATION")
                      print(outcome)
-@@ -265,14 +282,17 @@
+@@ -265,14 +298,18 @@
                  if action.parameters is not None:
                      action.parameters.pop("vr", None)
                      action.parameters.pop("subtitles", None)
@@ -136,6 +194,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 -                        action=action,
 -                        observation=observation,
 -                    )
++                    action.parameters.pop("question_context", None)
 +                step_record = TrajectoryStep(
 +                    step_id=step + 1,
 +                    thought=thought,
@@ -150,7 +209,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  if action.function_name == "answer":
                      self.final_answer = observation.outcome
                      break
-@@ -324,8 +344,11 @@
+@@ -324,8 +361,11 @@
                  seed=self.seed,
                  temperature=self.temperature,
              )
@@ -163,7 +222,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              return Trajectory(
                  question=question,
                  steps=self.trajectory_steps,
-@@ -333,6 +356,7 @@
+@@ -333,6 +373,7 @@
                  finish_reason="reach_max_steps",
              )
  
@@ -172,8 +231,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              question=question,
              steps=self.trajectory_steps,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
---- a/videoseek/cli.py	2026-09-21 02:23:15
-+++ b/videoseek/cli.py	2026-09-21 02:23:15
+--- a/videoseek/cli.py	2026-10-27 22:28:50
++++ b/videoseek/cli.py	2026-10-27 22:31:45
 @@ -6,6 +6,7 @@
  
  from config import general_config, init_config, prompts_config
@@ -182,7 +241,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
  
  def build_agent_config(args: argparse.Namespace) -> dict:
-@@ -26,6 +27,15 @@
+@@ -26,6 +27,23 @@
          default="./output/",
          help="Directory to write outputs (default: ./output/).",
      )
@@ -195,10 +254,26 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            "same video can collide on."
 +        ),
 +    )
++    p.add_argument(
++        "--question_context",
++        default=None,
++        help=(
++            "Question text shown to the skim and focus workers beside the planner's "
++            "query, without the answer options. Upstream sends them the query alone."
++        ),
++    )
      p.add_argument("--verbose", action="store_true", help="Print agent step logs.")
  
      # Allow overriding general.yaml keys (optional)
-@@ -48,11 +58,17 @@
+@@ -38,6 +56,7 @@
+     p.add_argument("--temperature", type=float, default=general_config['temperature'], help="Temperature.")
+     p.add_argument("--max_tokens", type=int, default=general_config['max_tokens'], help="Max output tokens of the LLM.")
+     p.add_argument("--max_steps", type=int, default=general_config['max_steps'], help="Max steps of the VideoSeek agent.")
++    p.add_argument("--max_run_cost_usd", type=float, default=general_config['max_run_cost_usd'], help="Stop the run before any call once its estimated cost reaches this.")
+     return p.parse_args(argv)
+ 
+ 
+@@ -48,11 +67,19 @@
  
      config = build_agent_config(args)
  
@@ -217,12 +292,16 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 -    run_dir.mkdir(parents=True, exist_ok=True)
 +    recorder.start(run_dir)
 +    recorder.record_settings(config)
++    recorder.settings["question_context_sent"] = args.question_context is not None
++    recorder.set_cost_cap(config["max_run_cost_usd"])
  
      # Run the agent
      agent = VideoSeekAgent(
-@@ -63,15 +79,34 @@
+@@ -62,16 +89,36 @@
+         output_dir=str(output_dir),
          tools=config["tools"],
          verbose=args.verbose,
++        question_context=args.question_context,
      )
 -    traj = agent.run(args.user_query)
 -    traj_dict = traj.to_dict()
@@ -260,8 +339,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      return 0
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
---- a/videoseek/core/trajectory.py	2026-09-21 02:23:15
-+++ b/videoseek/core/trajectory.py	2026-09-21 02:23:15
+--- a/videoseek/core/trajectory.py	2026-10-27 22:28:50
++++ b/videoseek/core/trajectory.py	2026-09-19 17:58:19
 @@ -6,16 +6,20 @@
  class TrajectoryStep:
      """A single step in the agent trajectory."""
@@ -286,8 +365,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-09-21 02:23:15
-@@ -0,0 +1,350 @@
++++ b/videoseek/recorder.py	2026-10-27 22:32:10
+@@ -0,0 +1,419 @@
 +"""Record exactly what a run sent to the model, so it can be audited and replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
@@ -319,12 +398,47 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +import base64
 +import hashlib
 +import json
++import subprocess
 +import time
 +from pathlib import Path
 +
 +# Token fields are summarised rather than guessed at: a field the provider did
 +# not report is counted as missing, never added to a total as a zero.
 +TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
++
++
++class RunBudgetExceeded(Exception):
++    """A run reached its cost cap. Raised before a call, so nothing more is spent."""
++
++
++def code_snapshot():
++    """The commit this code came from, and how the working tree differed from it.
++
++    A commit hash alone says nothing about uncommitted edits, which is exactly
++    what a run made mid-change would be using. The diff itself is returned so the
++    caller can keep it; untracked files are listed by name only. None outside a
++    git checkout.
++    """
++    here = Path(__file__).resolve().parent
++
++    def git(*args):
++        return subprocess.run(
++            ["git", "-C", str(here), *args], capture_output=True, text=True, check=True
++        ).stdout
++
++    try:
++        head = git("rev-parse", "HEAD").strip()
++        diff = git("diff", "HEAD")
++        untracked = git("ls-files", "--others", "--exclude-standard", ":/").splitlines()
++    except (OSError, subprocess.CalledProcessError):
++        return None, None
++    snapshot = {
++        "head": head,
++        "dirty": bool(diff or untracked),
++        "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest() if diff else None,
++        "untracked": untracked,
++    }
++    return snapshot, diff or None
 +
 +
 +class ImageRecorder:
@@ -335,6 +449,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        self.usage = {}
 +        self.settings = {}
 +        self.frame_space = None
++        self.cost_cap_usd = None
++        self._code_diff = None
 +        self._step = None
 +        self._tool = None
 +        self._provenance = None
@@ -374,11 +490,38 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        }
 +        self.frame_space = None
 +        self.tool_errors = []
++        self.cost_cap_usd = None
++        self._code_diff = None
 +        self._step = None
 +        self._tool = None
 +        self._provenance = None
 +        self._request = None
 +        self._seq = 0
++
++    def set_cost_cap(self, cap_usd):
++        """Stop this run before any call once its estimated cost reaches `cap_usd`."""
++        self.cost_cap_usd = cap_usd
++
++    def check_budget(self):
++        """Raise before a call that would start once the run is at its cap.
++
++        The check comes before a call, so the call that crosses the cap still
++        completes: a run can overshoot by at most one call. Calls LiteLLM could
++        not price add nothing here, so the guard is only as good as its price
++        table; `cost_unavailable_calls` says when it was blind.
++        """
++        if not self.active or self.cost_cap_usd is None:
++            return
++        if self.usage["cost_usd"] >= self.cost_cap_usd:
++            self._event(
++                "budget_exceeded",
++                cost_usd=self.usage["cost_usd"],
++                cap_usd=self.cost_cap_usd,
++            )
++            raise RunBudgetExceeded(
++                f"run cost ${self.usage['cost_usd']:.4f} reached its cap "
++                f"${self.cost_cap_usd:.2f}"
++            )
 +
 +    def set_context(self, step, tool):
 +        """Attribute subsequent captures to one agent step and tool."""
@@ -592,10 +735,11 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            "model_name", "temperature", "reasoning_effort", "max_steps",
 +            "max_tokens", "max_retries", "seed", "frame_sampling_factor",
 +            "overview_base", "skim_base", "focus_base", "tools",
-+            "api_base", "api_version",
++            "api_base", "api_version", "max_run_cost_usd",
 +        )
 +        prompt = config.get("SYSTEM_PROMPT") or ""
 +        self.settings = {key: config.get(key) for key in keys}
++        self.settings["code"], self._code_diff = code_snapshot()
 +        self.settings["api_key_present"] = config.get("api_key") is not None
 +        self.settings["system_prompt_sha256"] = hashlib.sha256(
 +            prompt.encode("utf-8")
@@ -617,6 +761,10 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        )
 +        self._write("usage.json", self.usage)
 +        self._write("settings.json", self.settings)
++        if self._code_diff:
++            # Kept beside the run so its exact code can be rebuilt from the
++            # commit in settings.json; `diff_sha256` there identifies it.
++            (self.run_dir / "code.diff").write_text(self._code_diff, encoding="utf-8")
 +
 +    def _write(self, name, payload):
 +        (self.run_dir / name).write_text(
@@ -639,17 +787,23 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +
 +recorder = ImageRecorder()
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/focus.py b/videoseek/tools/focus.py
---- a/videoseek/tools/focus.py	2026-09-21 02:23:15
-+++ b/videoseek/tools/focus.py	2026-09-21 02:23:15
-@@ -5,6 +5,7 @@
+--- a/videoseek/tools/focus.py	2026-10-27 22:28:50
++++ b/videoseek/tools/focus.py	2026-10-27 22:31:28
+@@ -4,7 +4,12 @@
+ import numpy as np
  from PIL import Image
  
- from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+-from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
++from videoseek.utils import (
++    call_llm_api,
++    convert_to_free_form_text_representation,
++    question_context_block,
++)
 +from videoseek.recorder import recorder
  from config import general_config
  
  
-@@ -42,8 +43,11 @@
+@@ -42,8 +47,11 @@
      Execute the focus tool.
      """
      query = parameters["query"]
@@ -663,7 +817,13 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      max_num_frames = general_config["frame_sampling_factor"] * general_config["focus_base"]
      vr = parameters["vr"]
      subtitles = parameters["subtitles"]
-@@ -88,6 +92,22 @@
+@@ -83,11 +91,28 @@
+             "text": (
+                 "Video Subtitles:\n"
+                 f"{subtitles_str}\n\n"
++                f"{question_context_block(parameters.get('question_context'))}"
+                 f"Question:\n{query}\n\n"
+                 "Please answer the question based on the given video clip. "
                  "If the clip is not related to the question, please return 'No relevant content found.'"
              )
          }
@@ -687,8 +847,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
      response = call_llm_api(
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/overview.py b/videoseek/tools/overview.py
---- a/videoseek/tools/overview.py	2026-09-21 02:23:15
-+++ b/videoseek/tools/overview.py	2026-09-21 02:23:15
+--- a/videoseek/tools/overview.py	2026-10-27 22:28:50
++++ b/videoseek/tools/overview.py	2026-09-19 19:22:06
 @@ -5,6 +5,7 @@
  from PIL import Image
  
@@ -725,17 +885,23 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          api_base=config['api_base'],
          api_key=config['api_key'],
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/skim.py b/videoseek/tools/skim.py
---- a/videoseek/tools/skim.py	2026-09-21 02:23:15
-+++ b/videoseek/tools/skim.py	2026-09-21 02:23:15
-@@ -5,6 +5,7 @@
+--- a/videoseek/tools/skim.py	2026-10-27 22:28:50
++++ b/videoseek/tools/skim.py	2026-10-27 22:37:09
+@@ -4,7 +4,12 @@
+ import numpy as np
  from PIL import Image
  
- from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+-from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
++from videoseek.utils import (
++    call_llm_api,
++    convert_to_free_form_text_representation,
++    question_context_block,
++)
 +from videoseek.recorder import recorder
  from config import general_config
  
  
-@@ -42,8 +43,11 @@
+@@ -42,8 +47,11 @@
      Execute the skim tool.
      """
      query = parameters["query"]
@@ -749,11 +915,14 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      num_frames = general_config["frame_sampling_factor"] * general_config["skim_base"]
      vr = parameters["vr"]
      subtitles = parameters["subtitles"]
-@@ -105,6 +109,22 @@
+@@ -103,9 +111,25 @@
+         })
+     content.append({
          "type": "text",
-         "text": f"Video Subtitles:\n{subtitles_str}\n\nQuestion:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
+-        "text": f"Video Subtitles:\n{subtitles_str}\n\nQuestion:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
++        "text": f"Video Subtitles:\n{subtitles_str}\n\n{question_context_block(parameters.get('question_context'))}Question:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
      })
-+
+ 
 +    # Which source frame each image shows. Skim sends one frame per image, so one
 +    # entry per index; the labels are rounded to 0.1s, these are not.
 +    fps = vr.get_avg_fps()
@@ -769,12 +938,24 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        avg_fps=fps,
 +        total_frames=len(vr),
 +    )
- 
++
      response = call_llm_api(
          messages=[{"role": "user", "content": content}],
+         model_name=config["model_name"],
+@@ -113,7 +137,9 @@
+         api_key=config["api_key"],
+         api_version=config["api_version"],
+         max_tokens=config["max_tokens"],
+-        reasoning_effort="low",
++        # Upstream fixes skim at "low" while every other call follows the config,
++        # which made a run's reasoning setting untrue for its skim calls.
++        reasoning_effort=config["reasoning_effort"],
+         seed=config["seed"],
+         temperature=config["temperature"],
+     )
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
---- a/videoseek/utils.py	2026-09-21 02:23:15
-+++ b/videoseek/utils.py	2026-09-21 02:23:15
+--- a/videoseek/utils.py	2026-10-27 22:28:50
++++ b/videoseek/utils.py	2026-10-27 22:32:13
 @@ -4,7 +4,9 @@
  import time
  from litellm import completion
@@ -855,7 +1036,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=temperature,
          reasoning_effort=reasoning_effort,
          tools=tools,
-@@ -85,6 +108,46 @@
+@@ -85,6 +108,67 @@
          response_format={"type": "json_object"} if return_json else None,
          timeout=900,
      )
@@ -885,6 +1066,26 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    return "", "empty"
 +
 +
++def question_context_block(question_context) -> str:
++    """The run's question as a worker sees it, or nothing when there is none.
++
++    Upstream gives `skim` and `focus` only the query the planner wrote. A query
++    such as "Does Event A or Event B occur right after Event C?" then reaches the
++    worker with its labels undefined, and a paraphrased query can drop the
++    detail that tells two similar scenes apart. The question stem carries the
++    event definitions; the answer options stay out, because choosing an option
++    is the planner's job, not a worker's.
++    """
++    if not question_context:
++        return ""
++    return (
++        "Context: the overall question this video is being searched for. Use it to "
++        "interpret the question below, for example what an event label refers to, "
++        "but answer only the question below.\n"
++        f"{question_context}\n\n"
++    )
++
++
 +def call_llm_api(*args, **kwargs) -> dict:
 +    """Single entry point: record the outgoing request, then call with retries.
 +
@@ -893,6 +1094,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    returns is counted by the retry wrapper, which knows why it stopped, so
 +    every call the agent made is accounted for exactly once.
 +    """
++    recorder.check_budget()
 +    recorder.record_request(kwargs)
 +    recorder.capture(kwargs.get("messages") or [])
 +    response = _call_llm_api(*args, **kwargs)
@@ -902,3 +1104,93 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
  
  def load_subtitles(subtitle_path: str):
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/video.py b/videoseek/video.py
+--- a/videoseek/video.py	1970-01-01 03:00:00
++++ b/videoseek/video.py	2026-10-27 23:17:10
+@@ -0,0 +1,86 @@
++"""Frame access for the tools, finding each frame by its own timestamp.
++
++decord seeks to the keyframe before a requested frame and counts decoded frames
++from there. On many YouTube files the seek lands one keyframe earlier than decord
++believes, so it hands back a frame one keyframe gap (1-5 s) before the one asked
++for, with no error. In the pilot, 18 of the 96 frames one run was shown came from
++earlier moments than their time labels said. `seek_accurate` does the same.
++
++This reader decodes forward from the seek until a frame's timestamp is the one
++asked for, so a seek that lands early costs decoding time, never the wrong frame.
++On the frames decord does return correctly the pixels are identical.
++
++It covers the part of decord's `VideoReader` the tools and scripts use.
++"""
++
++import av
++import numpy as np
++
++
++class FrameBatch:
++    """What decord's `get_batch` returns, as far as callers use it."""
++
++    def __init__(self, frames):
++        self._frames = frames
++
++    def asnumpy(self):
++        return self._frames
++
++
++class VideoReader:
++    def __init__(self, path):
++        self._container = av.open(str(path))
++        self._stream = self._container.streams.video[0]
++        self._stream.thread_type = "AUTO"
++        # Every frame the decoder will output, in display order, read from the
++        # packets without decoding. Packets an edit list cuts are not frames.
++        self._pts = sorted(
++            packet.pts
++            for packet in self._container.demux(self._stream)
++            if packet.pts is not None and not packet.is_discard
++        )
++        self._fps = float(self._stream.average_rate)
++        self._ticks_per_sec = 1 / float(self._stream.time_base)
++        self._decoded = None  # the decoder, positioned just after the frame at `_last`
++        self._last = None
++
++    def __len__(self):
++        return len(self._pts)
++
++    def __getitem__(self, index):
++        return self._frame(int(index))
++
++    def get_avg_fps(self):
++        return self._fps
++
++    def get_batch(self, indices):
++        return FrameBatch(np.stack([self._frame(int(index)) for index in indices]))
++
++    def _frame(self, index):
++        target = self._pts[index]
++        # A frame shortly after the last one decoded is reached faster by
++        # decoding on than by seeking back to a keyframe.
++        if self._last is not None and self._last < target <= self._last + 2 * self._ticks_per_sec:
++            frame = self._decode_to(target)
++            if frame is not None:
++                return frame
++        # A seek that lands after the frame finds nothing; each retry starts
++        # further back, the last from the first frame, which always reaches it.
++        for back_sec in (0, 10, 60, None):
++            start = self._pts[0] if back_sec is None else target - int(back_sec * self._ticks_per_sec)
++            self._container.seek(max(start, self._pts[0]), stream=self._stream, backward=True)
++            self._decoded = self._container.decode(self._stream)
++            frame = self._decode_to(target)
++            if frame is not None:
++                return frame
++        raise ValueError(f"frame {index} (pts {target}) was never decoded")
++
++    def _decode_to(self, target):
++        for frame in self._decoded:
++            self._last = frame.pts
++            if frame.pts == target:
++                return frame.to_ndarray(format="rgb24")
++            if frame.pts > target:
++                return None
++        self._last = None
++        return None

@@ -52,7 +52,7 @@ def video_properties(path: Path) -> dict:
     saw depend on it: `focus` sends frames unresized, so a video that was
     downloaded at a lower resolution is a caveat on any fine-detail claim.
     """
-    from decord import VideoReader
+    from videoseek.video import VideoReader
 
     reader = VideoReader(str(path))
     fps = reader.get_avg_fps()

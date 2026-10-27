@@ -357,7 +357,7 @@ def video_duration(video_path):
     """Duration in seconds, or None if the video is not available."""
     if not Path(video_path).is_file():
         return None
-    from decord import VideoReader
+    from videoseek.video import VideoReader
 
     reader = VideoReader(str(video_path))
     return round(len(reader) / reader.get_avg_fps(), 3)

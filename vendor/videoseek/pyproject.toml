@@ -9,9 +9,9 @@ description = "VideoSeek CLI and agent package"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  # Upstream "decord" ships no macOS arm64 wheel and no sdist; decord2 provides
-  # the same top-level `decord` module with arm64 wheels.
-  "decord2",
+  # Replaces upstream's decord, whose seek can return the wrong frame; see
+  # videoseek/video.py.
+  "av",
   "litellm",
   "numpy",
   "pillow",

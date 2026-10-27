@@ -2,8 +2,6 @@ import json
 from typing import List
 from abc import ABC, abstractmethod
 
-from decord import VideoReader
-
 from .core import Action, Observation, Trajectory, TrajectoryStep
 from .recorder import RunBudgetExceeded, recorder
 from .tools import DEFAULT_TOOL_REGISTRY
@@ -13,6 +11,8 @@ from .utils import (
     extract_thought,
     load_subtitles,
 )
+# Not decord's: its seek can silently return a frame seconds early; see video.py.
+from .video import VideoReader
 
 
 class BaseAgent(ABC):

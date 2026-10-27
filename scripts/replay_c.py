@@ -98,7 +98,7 @@ def sample_interval(vr, start_sec, end_sec, num_frames, fps):
 
 def build_spec(run_dir, video_dir):
     """Sample every annotated interval and lay out the request C would send."""
-    from decord import VideoReader
+    from videoseek.video import VideoReader
 
     run_dir = Path(run_dir)
     question = load_question(run_dir)

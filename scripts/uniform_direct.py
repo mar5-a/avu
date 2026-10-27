@@ -48,7 +48,7 @@ UNIFORM_FRAMES = 128
 
 def build_spec(row, video, num_frames=UNIFORM_FRAMES):
     """Sample the whole video evenly and lay out the request, frames kept apart."""
-    from decord import VideoReader
+    from videoseek.video import VideoReader
 
     vr = VideoReader(str(video))
     fps = vr.get_avg_fps()

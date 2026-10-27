@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import litellm  # noqa: E402
 from litellm.types.utils import Usage  # noqa: E402
-from decord import VideoReader  # noqa: E402
+from videoseek.video import VideoReader  # noqa: E402
 
 import videoseek.tools.focus as focus_tool  # noqa: E402
 import videoseek.tools.overview as overview_tool  # noqa: E402
@@ -1188,6 +1188,53 @@ def check_claimed_times(tmp=None):
     return "ranges, single times and fallbacks read; orderings and bare letters claim nothing"
 
 
+def check_reader_returns_frame_asked_for(tmp):
+    """The tools' reader returns the frame asked for, on a clip decord's seek gets wrong.
+
+    The clip has open GOPs: the frames shown just before a keyframe are decoded
+    after it and depend on the group before. YouTube encodes do this, and on this
+    exact clip decord returned the wrong frame for 19 of 128 requests. Every frame
+    the reader returns is compared with ffmpeg decoding the clip from the start.
+    """
+    clip = tmp / "open_gop.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+         "testsrc2=size=320x240:rate=30000/1001:duration=30", "-pix_fmt", "yuv420p",
+         "-c:v", "libx264", "-x264-params", "open-gop=1:keyint=90:min-keyint=20:bframes=3:b-pyramid=normal",
+         str(clip)],
+        check=True,
+    )
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(clip), "-fps_mode", "passthrough",
+         "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+        capture_output=True, check=True,
+    ).stdout
+    truth = np.frombuffer(raw, np.uint8).reshape(-1, 240, 320, 3).astype(int)
+    keyframes = [
+        index for index, flag in enumerate(subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries", "frame=key_frame",
+             "-of", "csv=p=0", str(clip)],
+            capture_output=True, text=True, check=True,
+        ).stdout.split())
+        if flag == "1"
+    ]
+    reader = VideoReader(str(clip))
+    assert len(reader) == len(truth), (len(reader), len(truth))
+    rng = np.random.default_rng(0)
+    requests = (
+        [np.linspace(0, len(reader) - 1, 64).astype(int)]
+        + [[key - back] for key in keyframes[1:] for back in (1, 2, 3)]
+        + [[int(rng.uniform(0, len(reader) - 1))] for _ in range(40)]
+    )
+    total = 0
+    for indices in requests:
+        for index, frame in zip(indices, reader.get_batch(indices).asnumpy()):
+            diff = np.abs(frame.astype(int) - truth[index]).mean()
+            assert diff < 1.0, f"asked for frame {index}, got a frame {diff:.1f} away from it"
+            total += 1
+    return f"{total} requests, {3 * (len(keyframes) - 1)} of them just before an open-GOP keyframe, all exact"
+
+
 CHECKS = (
     ("block structure", check_block_structure),
     ("usage accounting", check_usage_unknown_is_not_zero),
@@ -1212,6 +1259,7 @@ CHECKS = (
     ("cycle guard", check_cycle_guard),
     ("uniform request", check_uniform_request),
     ("claimed times", check_claimed_times),
+    ("reader returns the frame asked for", check_reader_returns_frame_asked_for),
 )
 
 

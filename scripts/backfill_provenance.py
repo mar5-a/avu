@@ -25,6 +25,8 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+# decord, not videoseek.video: this rebuilds what the pilot runs were sent, and
+# they read frames with decord, wrong frames included.
 from decord import VideoReader
 
 REPO = Path(__file__).resolve().parents[1]

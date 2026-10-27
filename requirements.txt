@@ -1,0 +1,7 @@
+# Packages our scripts need on top of the vendored VideoSeek package, which is
+# installed editable from vendor/videoseek and declares its own dependencies.
+#
+# pyarrow reads VES-Bench.parquet (scripts/run_one_question.py). It arrives today
+# through LiteLLM's dependency tree, which is not a promise, so it is named here.
+# Pinned because a run record is a research artifact.
+pyarrow==25.0.1

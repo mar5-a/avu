@@ -25,6 +25,9 @@ docs/deck/
 # macOS
 .DS_Store
 
+# ZCode editor's own copy of these rules
+.zcodeignore
+
 # Python
 __pycache__/
 *.py[cod]

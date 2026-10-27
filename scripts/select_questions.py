@@ -12,8 +12,16 @@ Ego4D questions are excluded: their `video_path` is a bare UUID with no source
 URL, so they cannot be fetched here. Any pilot from this script is YouTube-only,
 which should be said out loud whenever the pilot is described.
 
+The twenty (the effort cycle) are ordering questions only: five from each quartile
+of evidence span, at evenly spaced positions within it. Their exclusions are frozen
+to the pilot's questions and videos, rather than read from whatever has been run
+since, so the same command names the same twenty after this cycle's own runs
+exist. Five are held out by position — the third of every four in span order —
+for checking a fix later, never for exploring.
+
 Usage:
     .venv/bin/python scripts/select_questions.py            # the five
+    .venv/bin/python scripts/select_questions.py --set twenty
     .venv/bin/python scripts/select_questions.py --json
 """
 
@@ -35,6 +43,15 @@ FIVE = (
     ("event_counting", "all", 0.50, 1),
     ("event_counting", "spread", 0.50, 1),
 )
+
+TWENTY = tuple(
+    ("temporal_ordering", quartile, position, 1)
+    for quartile in ("q1", "q2", "q3", "q4")
+    for position in (0.1, 0.3, 0.5, 0.7, 0.9)
+)
+# Every question the pilot ran, plus q83, whose video is gone from YouTube. Their
+# videos are excluded too: a new question on a seen video is not a new video.
+PILOT_QUESTION_IDS = (15, 83, 150, 207, 257, 528, 550)
 
 
 def evidence_span(row):
@@ -69,17 +86,20 @@ def stratum(rows, name):
         return ordered[int(0.75 * len(ordered)):]
     if name == "tight":
         return ordered[: max(1, int(0.25 * len(ordered)))]
+    if name in ("q1", "q2", "q3", "q4"):
+        quarter = int(name[1]) - 1
+        return ordered[quarter * len(ordered) // 4: (quarter + 1) * len(ordered) // 4]
     raise SystemExit(f"unknown stratum {name!r}")
 
 
-def select(rows, spec, exclude=()):
+def select(rows, spec, exclude=(), skip_ids=None, skip_videos=()):
     """One question per line of `spec`, never two from the same video.
 
     `exclude` holds question ids whose video would not download: re-running with
     those ids excluded is how the rule replaces a pick mechanically instead of by
-    hand.
+    hand. `skip_ids` defaults to every question already run.
     """
-    done = already_run() | set(exclude)
+    done = (already_run() if skip_ids is None else set(skip_ids)) | set(exclude)
     eligible = sorted(
         (
             row
@@ -88,7 +108,7 @@ def select(rows, spec, exclude=()):
         ),
         key=lambda row: row["id"],
     )
-    chosen, videos = [], set()
+    chosen, videos = [], set(skip_videos)
     for task, name, position, count in spec:
         pool = stratum([row for row in eligible if row["task"] == task], name)
         if not pool:
@@ -111,9 +131,19 @@ def select(rows, spec, exclude=()):
     return chosen
 
 
+def select_twenty(rows, exclude=()):
+    """The effort cycle's twenty, each marked explore or holdout."""
+    pilot_videos = {row["video_id"] for row in rows if row["id"] in PILOT_QUESTION_IDS}
+    chosen = select(rows, TWENTY, exclude, PILOT_QUESTION_IDS, pilot_videos)
+    for rank, row in enumerate(sorted(chosen, key=evidence_span)):
+        row["_role"] = "holdout" if rank % 4 == 2 else "explore"
+    return chosen
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parquet", type=Path, default=REPO / "data" / "VES-Bench.parquet")
+    ap.add_argument("--set", choices=("five", "twenty"), default="five")
     ap.add_argument("--json", action="store_true", help="Print ids and metadata as JSON.")
     ap.add_argument(
         "--exclude",
@@ -124,7 +154,7 @@ def main():
 
     exclude = [int(part) for part in args.exclude.split(",") if part.strip()]
     rows = pq.read_table(args.parquet).to_pylist()
-    chosen = select(rows, FIVE, exclude)
+    chosen = select_twenty(rows, exclude) if args.set == "twenty" else select(rows, FIVE, exclude)
 
     if args.json:
         print(
@@ -135,6 +165,7 @@ def main():
                         "task": row["task"],
                         "video_id": row["video_id"],
                         "stratum": row["_stratum"],
+                        "role": row.get("_role"),
                         "intervals": len(row["evidence"]),
                         "evidence_span_sec": round(evidence_span(row), 1),
                     }
@@ -150,7 +181,7 @@ def main():
             f"{event['start_sec']:.0f}-{event['end_sec']:.0f}s" for event in row["evidence"]
         )
         print(
-            f"q{row['id']:<4} {row['task']:<18} {row['_stratum']:<28} "
+            f"q{row['id']:<4} {row['task']:<18} {row['_stratum']:<28} {row.get('_role') or '':<8}"
             f"video {row['video_id']:<12} {len(row['evidence'])} intervals, "
             f"span {evidence_span(row):.0f}s: {spans}"
         )

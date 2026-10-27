@@ -275,12 +275,18 @@ def check_call_failure_is_recorded(tmp):
         raise RuntimeError("boom: refused by the provider")
 
     with patch_attr(utils, "completion", refused):
-        assert call_llm_api(messages=[{"role": "user", "content": "hi"}]) is None
+        assert call_llm_api(
+            model_name="gemini/gemini-3.8-flash", api_base=None,
+            messages=[{"role": "user", "content": "hi"}],
+        ) is None
     recorder.write_manifest()
     usage = json.loads((Path(tmp) / "usage.json").read_text())
     assert usage["calls_failed"] == 1 and usage["calls"] == 0, usage
     events = [e for e in read_events(tmp) if e["kind"] == "attempt"]
     assert events and events[-1]["status"] == "failed"
+    # Without this the check passed on any failure, including a call that never
+    # reached the provider because its arguments were wrong.
+    assert "refused by the provider" in events[-1]["error"], events[-1]
 
 
 def check_high_demand_is_retried(tmp):

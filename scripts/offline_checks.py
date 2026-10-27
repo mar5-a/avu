@@ -42,8 +42,10 @@ from videoseek.cli import main as cli_main  # noqa: E402
 from videoseek.recorder import ImageRecorder, recorder  # noqa: E402
 from videoseek.utils import call_llm_api, retry_with_exponential_backoff  # noqa: E402
 
+import run_cycle  # noqa: E402
+import uniform_direct  # noqa: E402
 from replay_b import build_spec, label_is_only_timestamps, send, verify_spec  # noqa: E402
-from ves_score import score_run  # noqa: E402
+from ves_score import score_claimed_times, score_run  # noqa: E402
 
 FPS = 30
 SECONDS = 3
@@ -520,6 +522,8 @@ def check_run_dir_is_claimed(tmp):
     # A directory that already exists must be left alone rather than taken over.
     (tmp / "existing").mkdir()
     assert allocate_run_dir(tmp, {"id": 1, "task": "t"}).name != "existing"
+    labelled = allocate_run_dir(tmp, row, "high")
+    assert labelled.name == f"{run_name(row)}-high", labelled
     return f"{', '.join(path.name for path in claimed)}"
 
 
@@ -931,6 +935,259 @@ def check_replay_c_cli(tmp):
     return "32 sampled frames written, recorded with provenance, answer read back"
 
 
+HOCKEY_STEM = (
+    "Based on the visual segments provided in the video, in what sequence do these three scenes occur?\n"
+    "Event A: Several players crowd the goal crease area in a physical scramble.\n"
+    "Event B: Blackhawks player number 4 and a Ducks player battle along the boards.\n"
+    "Event C: A Blackhawks player controls the puck as a Ducks player pursues from behind."
+)
+HOCKEY_OPTIONS = "(A) Event A -> Event B -> Event C\n(B) Event C -> Event A -> Event B\n"
+
+
+def tool_call(call_id, name, arguments):
+    return fake_response(
+        tool_calls=[
+            {"id": call_id, "type": "function",
+             "function": {"name": name, "arguments": json.dumps(arguments)}}
+        ],
+        finish_reason="tool_calls",
+        usage=fake_usage(),
+    )
+
+
+def check_workers_get_question_and_effort(tmp):
+    """skim and focus see the event definitions; every call carries the run's effort.
+
+    The pilot's hockey run sent a worker "Does Event A or Event B occur right after
+    Event C?" with nothing saying what those events were, and upstream fixed skim
+    at "low" whatever the run asked for.
+    """
+    video = make_test_video(tmp / "clip.mp4")
+    run_dir = tmp / "run"
+    scripted = [
+        fake_response(content="Skim the clip first.", usage=fake_usage()),
+        tool_call("call_1", "skim", {"query": "Where is Event A?", "start_time": 0.5, "end_time": 2.5}),
+        fake_response(content="A test pattern.", usage=fake_usage()),
+        fake_response(content="Now look closely.", usage=fake_usage()),
+        tool_call("call_2", "focus", {
+            "query": "Does Event A or Event B occur right after Event C?",
+            "start_time": 1.0, "end_time": 2.0,
+        }),
+        fake_response(content="No relevant content found.", usage=fake_usage()),
+        fake_response(content="I can answer.", usage=fake_usage()),
+        tool_call("call_3", "answer", {}),
+        fake_response(content="B", usage=fake_usage()),
+    ]
+
+    def scripted_completion(*args, **kwargs):
+        return scripted.pop(0)
+
+    with patch_attr(utils, "completion", scripted_completion):
+        cli_main(
+            [
+                "--video_path", str(video),
+                "--user_query", f"{HOCKEY_STEM}\n{HOCKEY_OPTIONS}",
+                "--question_context", HOCKEY_STEM,
+                "--reasoning_effort", "high",
+                "--output_dir", str(tmp),
+                "--run_dir", str(run_dir),
+            ]
+        )
+
+    manifest = json.loads((run_dir / "images.json").read_text())
+    for tool in ("skim", "focus"):
+        call = next(c for c in manifest["calls"] if c["tool"] == tool)
+        prompt = call["blocks"][-1]["text"]
+        assert HOCKEY_STEM in prompt, f"{tool} did not receive the event definitions"
+        assert "(A) Event A -> Event B -> Event C" not in prompt, f"{tool} received the options"
+    requests = [e for e in read_events(run_dir) if e["kind"] == "request"]
+    efforts = {e["reasoning_effort"] for e in requests}
+    assert efforts == {"high"}, f"calls ran at {efforts}, not only 'high'"
+    trajectory_text = (run_dir / "trajectory.json").read_text()
+    assert "question_context" not in trajectory_text, "the context leaked into the trajectory"
+    settings = json.loads((run_dir / "settings.json").read_text())
+    assert settings["question_context_sent"] is True and settings["reasoning_effort"] == "high"
+
+    # Without a context the worker prompt is upstream's, unchanged.
+    reader = VideoReader(str(video))
+    bare_dir = tmp / "bare"
+    bare_dir.mkdir()
+    recorder.start(bare_dir)
+    with patch_attr(focus_tool, "call_llm_api", recording_stub("x")):
+        focus_tool.execute_focus(
+            TOOLS_CONFIG,
+            {"query": "q", "start_time": 1.0, "end_time": 2.0, "vr": reader, "subtitles": []},
+        )
+    recorder.write_manifest()
+    bare = json.loads((bare_dir / "images.json").read_text())["calls"][0]["blocks"][-1]["text"]
+    assert "Context:" not in bare and "Question:\nq\n" in bare, bare
+    return f"{len(requests)} calls, all at 'high'; skim and focus saw the definitions, not the options"
+
+
+def check_effort_reaches_gemini(tmp=None):
+    """LiteLLM turns each effort into a Gemini thinking level rather than dropping it."""
+    from litellm.utils import get_optional_params
+
+    for effort in ("medium", "high"):
+        params = get_optional_params(
+            model="gemini-3.8-flash", custom_llm_provider="gemini",
+            reasoning_effort=effort, temperature=1.0,
+        )
+        level = (params.get("thinkingConfig") or {}).get("thinkingLevel")
+        assert level == effort, f"{effort} became {params.get('thinkingConfig')}"
+    return "medium and high arrive as thinkingLevel medium and high"
+
+
+def check_code_snapshot(tmp):
+    """Every run records the commit it ran on and keeps any uncommitted diff."""
+    record = ImageRecorder()
+    record.start(tmp)
+    record.record_settings(dict(TOOLS_CONFIG))
+    record.write_manifest()
+    code = json.loads((Path(tmp) / "settings.json").read_text())["code"]
+    head = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert code["head"] == head, code
+    diff_path = Path(tmp) / "code.diff"
+    if code["diff_sha256"]:
+        assert diff_path.is_file(), "a dirty tree's diff was not kept"
+        digest = hashlib.sha256(diff_path.read_text().encode("utf-8")).hexdigest()
+        assert digest == code["diff_sha256"], "code.diff does not match its recorded hash"
+    else:
+        assert not diff_path.exists(), "a clean tree wrote a diff"
+    return f"head {head[:7]}, dirty={code['dirty']}, {len(code['untracked'])} untracked"
+
+
+def check_run_budget_stops_run(tmp):
+    """A run at its cost cap stops before the next call, and says why.
+
+    The call that crosses the cap is inside a tool here, the case most likely to be
+    mistaken for a failed tool: it must end the run, not become an observation.
+    """
+    video = make_test_video(tmp / "clip.mp4")
+    run_dir = tmp / "run"
+    scripted = [
+        fake_response(content="Look closely.", usage=fake_usage()),
+        tool_call("call_1", "focus", {"query": "q", "start_time": 1.0, "end_time": 2.0}),
+        fake_response(content="never reached", usage=fake_usage()),
+    ]
+
+    def scripted_completion(*args, **kwargs):
+        return scripted.pop(0)
+
+    with patch_attr(utils, "completion", scripted_completion), \
+            patch_attr(litellm, "completion_cost", lambda **kwargs: 0.4):
+        try:
+            cli_main(
+                [
+                    "--video_path", str(video),
+                    "--user_query", "What colour is the pattern?\n(A) red\n(B) blue\n",
+                    "--max_run_cost_usd", "0.7",
+                    "--output_dir", str(tmp),
+                    "--run_dir", str(run_dir),
+                ]
+            )
+            raise AssertionError("the run was expected to stop at its cap")
+        except Exception as error:  # noqa: BLE001 - the stop itself is the subject
+            assert type(error).__name__ == "RunBudgetExceeded", error
+
+    trajectory = json.loads((run_dir / "trajectory.json").read_text())
+    assert trajectory["finish_reason"] == "error" and "RunBudgetExceeded" in trajectory["error"]
+    assert trajectory["steps"] == [], "the stop was recorded as a tool step"
+    usage = json.loads((run_dir / "usage.json").read_text())
+    assert usage["calls"] == 2 and abs(usage["cost_usd"] - 0.8) < 1e-9, usage
+    assert any(e["kind"] == "budget_exceeded" for e in read_events(run_dir))
+    assert json.loads((run_dir / "images.json").read_text())["tool_errors"] == []
+    return "stopped after 2 calls at $0.80 against a $0.70 cap, before the focus call"
+
+
+def check_cycle_guard(tmp):
+    """The cycle never starts a run whose worst case could pass the cap."""
+    assert run_cycle.may_start(11.0, 1.0, 12.0)
+    assert not run_cycle.may_start(11.01, 1.0, 12.0)
+    assert run_cycle.read_ledger(Path(tmp) / "missing.jsonl") == []
+    entries = [
+        {"run_dir": "a", "cost_usd": 0.2, "cost_unavailable_calls": 0},
+        {"run_dir": "b", "cost_usd": 0.3, "cost_unavailable_calls": 0},
+    ]
+    spent, blind = run_cycle.spent_so_far(entries)
+    assert abs(spent - 0.5) < 1e-9 and blind == []
+    entries.append({"run_dir": "c", "cost_usd": 0.1, "cost_unavailable_calls": 2})
+    entries.append({"run_dir": "d", "cost_usd": None, "cost_unavailable_calls": None})
+    _, blind = run_cycle.spent_so_far(entries)
+    assert [entry["run_dir"] for entry in blind] == ["c", "d"], blind
+    return "$11.00 + $1 worst case may start under $12, $11.01 may not; unpriced runs stop it"
+
+
+def check_uniform_request(tmp):
+    """The uniform arm sends even frames, each after its own time label, then the question."""
+    video = make_test_video(tmp / "clip.mp4")
+    row = {
+        "id": 1, "task": "temporal_ordering", "dataset": "synthetic", "source_question_id": 1,
+        "video_id": "clip", "question": HOCKEY_STEM,
+        "options": {"A": "Event A -> Event B -> Event C", "B": "Event C -> Event A -> Event B"},
+        "answer": "B",
+        "evidence": [{"id": 1, "start_sec": 1.0, "end_sec": 2.0, "description": "Event A: synthetic"}],
+    }
+    spec, frames = uniform_direct.build_spec(row, video, 16)
+    assert uniform_direct.verify_spec(spec, frames, row) == [], uniform_direct.verify_spec(spec, frames, row)
+    kinds = [block["type"] for block in spec["blocks"][:3]]
+    assert kinds == ["text", "text", "image"], "a label must come before its frame"
+
+    tampered = json.loads(json.dumps(spec))
+    labels = [b for b in tampered["blocks"] if b["type"] == "text"][1:-1]
+    labels[0]["text"], labels[1]["text"] = labels[1]["text"], labels[0]["text"]
+    assert uniform_direct.verify_spec(tampered, frames, row), "swapped labels were accepted"
+
+    run_dir = tmp / "run"
+    run_dir.mkdir()
+    with patch_attr(utils, "completion", lambda *a, **k: fake_response(content="B", usage=fake_usage())):
+        payload = uniform_direct.send(spec, frames, row, video, run_dir, dict(TOOLS_CONFIG))
+    assert payload["images_verified_against_sample"] and payload["answer_letter"] == "B", payload
+    manifest = json.loads((run_dir / "images.json").read_text())
+    sent_indices = [image["provenance"]["frame_indices"][0] for image in manifest["images"]]
+    assert sent_indices == spec["frame_indices"], "provenance does not name the sampled frames"
+    scored = score_run(run_dir, video_dir=tmp)
+    assert scored["decoded_frames"] == 16 and scored["answer"]["correct"], scored["answer"]
+    return f"16 even frames across {spec['duration_sec']}s, labelled before each frame, scored"
+
+
+def check_claimed_times(tmp=None):
+    """The time a run states for each event is read, and compared with its interval."""
+    evidence = [
+        {"start_sec": 43.0, "end_sec": 48.0, "description": "Event C: From 43 to 48 seconds..."},
+        {"start_sec": 115.0, "end_sec": 122.0, "description": "Event A: Between 115 and 122..."},
+        {"start_sec": 202.0, "end_sec": 206.0, "description": "Event B: From 202 to 206..."},
+    ]
+    hockey = (
+        "- **Event C**: At around 15.0s – 18.0s, a Blackhawks player controls the puck.\n"
+        "- **Event B**: At around 58.0s – 64.0s, Blackhawks player number 4 battles.\n"
+        "- **Event A**: At around 92.0s – 104.0s, several players crowd the crease.\n\n"
+        "Therefore, the sequence is Event C -> Event B -> Event A.\n\nC"
+    )
+    scored = score_claimed_times([("answer", hockey)], evidence)
+    by_event = {e["event"]: e for e in scored["per_event"]}
+    assert scored["claimed"] == 3 and scored["overlapping"] == 0, scored
+    assert by_event["C"]["claimed_sec"] == [15.0, 18.0] and by_event["C"]["gap_sec"] == 25.0
+
+    timer = "1. **Event C**: Between approximately 40s and 45s, the wire.\n2. **Event A**: Around 120 to 130 seconds."
+    scored = score_claimed_times([("answer", "A"), ("final_thought", timer)], evidence)
+    by_event = {e["event"]: e for e in scored["per_event"]}
+    assert by_event["C"]["claimed_sec"] == [40.0, 45.0] and by_event["C"]["overlaps"]
+    assert by_event["A"]["claimed_sec"] == [120.0, 130.0] and by_event["A"]["source"] == "final_thought"
+    assert by_event["B"]["claimed_sec"] is None
+
+    inline = "Event C (at 44s) comes before Event B (at 58s)."
+    scored = score_claimed_times([("answer", inline)], evidence)
+    by_event = {e["event"]: e for e in scored["per_event"]}
+    assert by_event["C"]["claimed_sec"] == [44.0, 44.0] and by_event["B"]["claimed_sec"] == [58.0, 58.0]
+
+    for silent in ("Event C -> Event B -> Event A", "Does Event A or Event B occur after Event C?", "D"):
+        assert score_claimed_times([("answer", silent)], evidence)["claimed"] == 0, silent
+    return "ranges, single times and fallbacks read; orderings and bare letters claim nothing"
+
+
 CHECKS = (
     ("block structure", check_block_structure),
     ("usage accounting", check_usage_unknown_is_not_zero),
@@ -948,6 +1205,13 @@ CHECKS = (
     ("replay B records what it sent", check_b_send_records_what_it_sent),
     ("replay C request", check_replay_c_request),
     ("replay C CLI", check_replay_c_cli),
+    ("workers get question and effort", check_workers_get_question_and_effort),
+    ("effort reaches Gemini", check_effort_reaches_gemini),
+    ("code snapshot", check_code_snapshot),
+    ("run budget stops a run", check_run_budget_stops_run),
+    ("cycle guard", check_cycle_guard),
+    ("uniform request", check_uniform_request),
+    ("claimed times", check_claimed_times),
 )
 
 

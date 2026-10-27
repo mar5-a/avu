@@ -11,6 +11,9 @@ temperature: 1.0
 max_steps: 20
 max_retries: 8
 max_tokens: 32768
+# A runaway guard, not a budget: a run stops before its next call once LiteLLM's
+# cost estimate reaches this. The pilot's priciest ordering run cost $0.17.
+max_run_cost_usd: 1.0
 
 frame_sampling_factor: 4
 overview_base: 16

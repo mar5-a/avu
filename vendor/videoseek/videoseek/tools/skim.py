@@ -4,7 +4,11 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 
-from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+from videoseek.utils import (
+    call_llm_api,
+    convert_to_free_form_text_representation,
+    question_context_block,
+)
 from videoseek.recorder import recorder
 from config import general_config
 
@@ -107,7 +111,7 @@ def execute_skim(config: dict, parameters: dict) -> str:
         })
     content.append({
         "type": "text",
-        "text": f"Video Subtitles:\n{subtitles_str}\n\nQuestion:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
+        "text": f"Video Subtitles:\n{subtitles_str}\n\n{question_context_block(parameters.get('question_context'))}Question:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
     })
 
     # Which source frame each image shows. Skim sends one frame per image, so one
@@ -133,7 +137,9 @@ def execute_skim(config: dict, parameters: dict) -> str:
         api_key=config["api_key"],
         api_version=config["api_version"],
         max_tokens=config["max_tokens"],
-        reasoning_effort="low",
+        # Upstream fixes skim at "low" while every other call follows the config,
+        # which made a run's reasoning setting untrue for its skim calls.
+        reasoning_effort=config["reasoning_effort"],
         seed=config["seed"],
         temperature=config["temperature"],
     )

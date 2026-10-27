@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from decord import VideoReader
 
 from .core import Action, Observation, Trajectory, TrajectoryStep
-from .recorder import recorder
+from .recorder import RunBudgetExceeded, recorder
 from .tools import DEFAULT_TOOL_REGISTRY
 from .utils import (
     call_llm_api,
@@ -44,10 +44,14 @@ class VideoSeekAgent(BaseAgent):
         output_dir: str,
         tools: list,
         verbose: bool = False,
+        question_context: str = None,
     ):
         super().__init__()
         self.config = config
         self.video_path = video_path
+        # Shown to the skim and focus workers beside the planner's query; see
+        # `utils.question_context_block`. None keeps upstream's query-only prompt.
+        self.question_context = question_context
         self.vr = VideoReader(video_path)
         self.tool_registry = DEFAULT_TOOL_REGISTRY
         self.tools = self.tool_registry.resolve_tools(tools + ["answer"])
@@ -137,6 +141,8 @@ class VideoSeekAgent(BaseAgent):
                             function_id=function_id,
                         )
                     )
+        except RunBudgetExceeded:
+            raise
         except Exception as e:
             print(f"Error parsing actions: {e}")
             return []
@@ -156,7 +162,13 @@ class VideoSeekAgent(BaseAgent):
         if function_name == "answer":
             parameters = {"question": self.question, "messages": self.messages}
         else:
-            parameters.update({"vr": self.vr, "subtitles": self.subtitles})
+            parameters.update(
+                {
+                    "vr": self.vr,
+                    "subtitles": self.subtitles,
+                    "question_context": self.question_context,
+                }
+            )
         
         if self.tool_registry.has_tool(function_name):
             outcome = self.tool_registry.get_function(function_name)(
@@ -264,6 +276,10 @@ class VideoSeekAgent(BaseAgent):
                 recorder.set_context(step=step + 1, tool=action.function_name)
                 try:
                     outcome = self.__exec_action(action)
+                except RunBudgetExceeded:
+                    # The run is over, not the tool: recorded as a failed tool it
+                    # would read as evidence the agent chose to do without.
+                    raise
                 except Exception as e:
                     # "Tool execution failed." alone reads the same whether the
                     # model chose badly or the run is broken, so keep the reason
@@ -282,6 +298,7 @@ class VideoSeekAgent(BaseAgent):
                 if action.parameters is not None:
                     action.parameters.pop("vr", None)
                     action.parameters.pop("subtitles", None)
+                    action.parameters.pop("question_context", None)
                 step_record = TrajectoryStep(
                     step_id=step + 1,
                     thought=thought,

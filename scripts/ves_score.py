@@ -17,6 +17,14 @@ These are the benchmark's definitions (paper §4.3), not ones invented here:
   means evidence intervals were observed more than their share of the video.
 - **ECA@k** — answered correctly while also passing Coverage@k.
 
+One measure here is ours, not the paper's, and is labelled so in the output:
+
+- **Claimed times** — for each event, the time the run's own answer gives for it
+  ("Event C: at around 15.0s – 18.0s"), and whether that overlaps the event's
+  annotated interval. Coverage says a frame was delivered inside an interval;
+  this says whether the run placed the event there. Neither shows the event was
+  recognised, and an answer that names no times scores nothing either way.
+
 Two conventions the paper leaves open are fixed here and written into the output
 so figures stay comparable: a frame counts as inside an interval when its exact
 timestamp falls in the closed range [start, end], and timestamps are compared as
@@ -201,6 +209,97 @@ def covering_call(interval, windows):
     }
 
 
+EVENT_LABEL = re.compile(r"\bEvent\s+([A-Z])\b")
+SECONDS = r"(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds)\b"
+TIME_RANGE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds)?\s*(?:-|–|—|to|and|until)\s*" + SECONDS,
+    flags=re.IGNORECASE,
+)
+TIME_POINT = re.compile(SECONDS, flags=re.IGNORECASE)
+
+
+def claimed_windows(sources):
+    """Event letter -> the window a run's own text places it in, and where it said so.
+
+    `sources` is [(name, text)] in order of preference. A claim is the first time
+    range (or single time) after a mention of "Event X", before the next event's
+    mention or the end of that line, so "Event C -> Event B -> Event A" claims
+    nothing and "Event C: at around 15.0s – 18.0s" claims 15-18s. The first
+    source that places an event wins.
+    """
+    claims = {}
+    for name, text in sources:
+        for line in (text or "").splitlines():
+            mentions = list(EVENT_LABEL.finditer(line))
+            for mention, following in zip(mentions, mentions[1:] + [None]):
+                event = mention.group(1).upper()
+                if event in claims:
+                    continue
+                segment = line[mention.end(): following.start() if following else len(line)]
+                found = TIME_RANGE.search(segment)
+                if found:
+                    window = sorted((float(found.group(1)), float(found.group(2))))
+                else:
+                    point = TIME_POINT.search(segment)
+                    if not point:
+                        continue
+                    window = [float(point.group(1))] * 2
+                claims[event] = {"window_sec": window, "source": name}
+    return claims
+
+
+def score_claimed_times(sources, evidence):
+    """Per annotated event: the run's claimed window, and whether it overlaps."""
+    claims = claimed_windows(sources)
+    per_event = []
+    for interval in evidence:
+        label = EVENT_LABEL.match((interval.get("description") or "").strip())
+        if not label:
+            continue
+        event = label.group(1).upper()
+        start, end = float(interval["start_sec"]), float(interval["end_sec"])
+        claim = claims.get(event)
+        record = {"event": event, "gold_sec": [start, end], "claimed_sec": None,
+                  "source": None, "overlaps": None, "gap_sec": None}
+        if claim:
+            low, high = claim["window_sec"]
+            gap = max(start - high, low - end, 0.0)
+            record.update(
+                claimed_sec=[low, high], source=claim["source"],
+                overlaps=gap == 0.0, gap_sec=round(gap, 3),
+            )
+        per_event.append(record)
+    return {
+        "measure": "ours, not the paper's: overlap of the run's stated time with the interval",
+        "events": len(per_event),
+        "claimed": sum(1 for e in per_event if e["claimed_sec"] is not None),
+        "overlapping": sum(1 for e in per_event if e["overlaps"]),
+        "per_event": per_event,
+    }
+
+
+def answer_texts(run_dir, prediction):
+    """The texts a run states its answer in, most direct first.
+
+    The agent's answer is sometimes a bare letter while the planner's last
+    thought lists each event's time; a direct-answer run's times, if any, are in
+    its answer or the reasoning the provider returned.
+    """
+    run_dir = Path(run_dir)
+    sources = [("answer", prediction)]
+    trajectory = run_dir / "trajectory.json"
+    if trajectory.is_file():
+        steps = json.loads(trajectory.read_text()).get("steps") or []
+        if steps:
+            sources.append(("final_thought", steps[-1].get("thought")))
+    for name in ("uniform_answer.json", "b_answer.json"):
+        path = run_dir / name
+        if path.is_file():
+            reasoning = json.loads(path.read_text()).get("answer_diagnostics", {}).get("reasoning")
+            sources.append(("reasoning", reasoning))
+    return sources
+
+
 def score_question(observation, evidence, windows=None, k_levels=(1, 2, 3)):
     """Coverage, evidence precision and per-interval detail for one question."""
     decoded = observation["decoded"]
@@ -312,6 +411,9 @@ def score_run(run_dir, provenance_path=None, video_dir=None, ep_ref=EP_REF_VES_B
     if result["evidence_precision"] is not None:
         result["allocation_ratio"] = result["evidence_precision"] / ep_ref
     result["ECA"] = {k: bool(correct and scored["coverage"][k]) for k in k_levels}
+    result["claimed_times"] = score_claimed_times(
+        answer_texts(run_dir, prediction), question["evidence"]
+    )
     return result
 
 def format_report(result):
@@ -369,6 +471,17 @@ def format_report(result):
         f"  evidence precision: {precision:.3f}" if precision is not None
         else "  evidence precision: n/a"
     )
+    claimed = result["claimed_times"]
+    details = ", ".join(
+        f"{e['event']} {e['claimed_sec'][0]:.0f}-{e['claimed_sec'][1]:.0f}s vs "
+        f"{e['gold_sec'][0]:.0f}-{e['gold_sec'][1]:.0f}s {'ok' if e['overlaps'] else 'miss'}"
+        if e["claimed_sec"] else f"{e['event']} no time stated"
+        for e in claimed["per_event"]
+    )
+    lines.append(
+        f"  claimed times (ours): {claimed['overlapping']}/{claimed['events']} events placed "
+        f"inside their interval ({claimed['claimed']} stated): {details}"
+    )
     if result.get("allocation_ratio") is not None:
         share = (
             f"{result['reference_ep_this_question']:.3f}"
@@ -419,6 +532,12 @@ def main():
         accuracy = sum(r["answer"]["correct"] for r in results) / n
         print(f"  Evidence Precision: {sum(precisions) / len(precisions):.3f}"
               f"   Accuracy: {accuracy:.3f}")
+        events = sum(r["claimed_times"]["events"] for r in results)
+        print(
+            f"  claimed times (ours): {sum(r['claimed_times']['overlapping'] for r in results)}"
+            f"/{events} events placed inside their interval, "
+            f"{sum(r['claimed_times']['claimed'] for r in results)} with a time stated"
+        )
         for tool in sorted({t for r in results for t in r["window_shifts"]["by_tool"]}):
             groups = [
                 r["window_shifts"]["by_tool"][tool]

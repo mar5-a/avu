@@ -4,7 +4,11 @@ from io import BytesIO
 import numpy as np
 from PIL import Image
 
-from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+from videoseek.utils import (
+    call_llm_api,
+    convert_to_free_form_text_representation,
+    question_context_block,
+)
 from videoseek.recorder import recorder
 from config import general_config
 
@@ -87,6 +91,7 @@ def execute_focus(config: dict, parameters: dict) -> str:
             "text": (
                 "Video Subtitles:\n"
                 f"{subtitles_str}\n\n"
+                f"{question_context_block(parameters.get('question_context'))}"
                 f"Question:\n{query}\n\n"
                 "Please answer the question based on the given video clip. "
                 "If the clip is not related to the question, please return 'No relevant content found.'"

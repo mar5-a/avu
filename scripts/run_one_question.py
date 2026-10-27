@@ -1,8 +1,9 @@
 """Run one VES-Bench question through VideoSeek and save the run.
 
 The benchmark's answer key and evidence annotations are written to the run
-directory for our own inspection and are never placed in the prompt. The model
-sees the question stem and the four options, and nothing else.
+directory for our own inspection and are never placed in the prompt. The planner
+sees the question stem and the four options; the skim and focus workers see the
+stem alone, beside the planner's query, so event labels mean something to them.
 
 The run directory is claimed here and passed down, rather than discovered
 afterwards by looking at what appeared in the output directory: with two runs
@@ -67,18 +68,37 @@ def video_properties(path: Path) -> dict:
     }
 
 
-def run_name(row: dict) -> str:
-    """A readable run directory name: `q257-temporal-ordering-2026-09-19`."""
-    return f"q{row['id']}-{row['task'].replace('_', '-')}-{time.strftime('%Y-%m-%d')}"
+def question_record(row: dict, video: Path, query: str) -> dict:
+    """The answer key and what was sent, kept beside a run. Never sent to the model."""
+    return {
+        "note": "Answer key and evidence. Never sent to the model.",
+        "id": row["id"],
+        "task": row["task"],
+        "dataset": row["dataset"],
+        "source_question_id": row["source_question_id"],
+        "video_id": row["video_id"],
+        "video": video_properties(video),
+        "question": row["question"],
+        "options": row["options"],
+        "answer": row["answer"],
+        "evidence": row["evidence"],
+        "query_sent_to_model": query,
+    }
 
 
-def allocate_run_dir(output_dir: Path, row: dict) -> Path:
+def run_name(row: dict, label: str = None) -> str:
+    """A readable run directory name: `q257-temporal-ordering-2026-09-19[-label]`."""
+    name = f"q{row['id']}-{row['task'].replace('_', '-')}-{time.strftime('%Y-%m-%d')}"
+    return f"{name}-{label}" if label else name
+
+
+def allocate_run_dir(output_dir: Path, row: dict, label: str = None) -> Path:
     """Claim today's run name for this question, suffixing if it is taken.
 
     Claimed with `exist_ok=False` so that two runs starting together cannot both
     believe they own the same directory.
     """
-    base = run_name(row)
+    base = run_name(row, label)
     for n in range(1, 1000):
         candidate = output_dir / (base if n == 1 else f"{base}-{n}")
         try:
@@ -96,6 +116,10 @@ def main() -> int:
     ap.add_argument("--video-dir", type=Path, default=REPO / "data" / "videos")
     ap.add_argument("--output-dir", type=Path, default=REPO / "data" / "runs")
     ap.add_argument("--max-steps", type=int, default=None)
+    ap.add_argument("--reasoning-effort", default=None, help="Override general.yaml for every call.")
+    ap.add_argument("--label", default=None, help="Appended to the run name, e.g. the arm.")
+    ap.add_argument("--run-dir", type=Path, default=None,
+                    help="A directory already claimed for this run, e.g. by run_cycle.py.")
     args = ap.parse_args()
 
     row = load_question(args.parquet, args.question_id)
@@ -112,42 +136,29 @@ def main() -> int:
     print(f"evidence {spans}")
     print("-" * 70)
 
-    run_dir = allocate_run_dir(args.output_dir, row)
+    run_dir = args.run_dir or allocate_run_dir(args.output_dir, row, args.label)
     argv = [
         "--video_path", str(video),
         "--user_query", query,
+        "--question_context", row["question"],
         "--output_dir", str(args.output_dir),
         "--run_dir", str(run_dir),
         "--verbose",
     ]
     if args.max_steps is not None:
         argv += ["--max_steps", str(args.max_steps)]
+    if args.reasoning_effort is not None:
+        argv += ["--reasoning_effort", args.reasoning_effort]
 
     try:
         rc = cli_main(argv)
     finally:
         # The answer key is kept next to the run whatever happened to it, so a
         # failed attempt is still readable and still comparable.
+        record = question_record(row, video, query)
+        record["question_context_sent_to_workers"] = row["question"]
         (run_dir / "question.json").write_text(
-            json.dumps(
-                {
-                    "note": "Answer key and evidence. Never sent to the model.",
-                    "id": row["id"],
-                    "task": row["task"],
-                    "dataset": row["dataset"],
-                    "source_question_id": row["source_question_id"],
-                    "video_id": row["video_id"],
-                    "video": video_properties(video),
-                    "question": row["question"],
-                    "options": row["options"],
-                    "answer": row["answer"],
-                    "evidence": row["evidence"],
-                    "query_sent_to_model": query,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
         )
     print("-" * 70)
     print(f"run dir: {run_dir}")

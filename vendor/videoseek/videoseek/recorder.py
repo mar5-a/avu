@@ -29,12 +29,47 @@ replay must not inherit. Replays build from `images` and their labels.
 import base64
 import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
 
 # Token fields are summarised rather than guessed at: a field the provider did
 # not report is counted as missing, never added to a total as a zero.
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+class RunBudgetExceeded(Exception):
+    """A run reached its cost cap. Raised before a call, so nothing more is spent."""
+
+
+def code_snapshot():
+    """The commit this code came from, and how the working tree differed from it.
+
+    A commit hash alone says nothing about uncommitted edits, which is exactly
+    what a run made mid-change would be using. The diff itself is returned so the
+    caller can keep it; untracked files are listed by name only. None outside a
+    git checkout.
+    """
+    here = Path(__file__).resolve().parent
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(here), *args], capture_output=True, text=True, check=True
+        ).stdout
+
+    try:
+        head = git("rev-parse", "HEAD").strip()
+        diff = git("diff", "HEAD")
+        untracked = git("ls-files", "--others", "--exclude-standard", ":/").splitlines()
+    except (OSError, subprocess.CalledProcessError):
+        return None, None
+    snapshot = {
+        "head": head,
+        "dirty": bool(diff or untracked),
+        "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest() if diff else None,
+        "untracked": untracked,
+    }
+    return snapshot, diff or None
 
 
 class ImageRecorder:
@@ -45,6 +80,8 @@ class ImageRecorder:
         self.usage = {}
         self.settings = {}
         self.frame_space = None
+        self.cost_cap_usd = None
+        self._code_diff = None
         self._step = None
         self._tool = None
         self._provenance = None
@@ -84,11 +121,38 @@ class ImageRecorder:
         }
         self.frame_space = None
         self.tool_errors = []
+        self.cost_cap_usd = None
+        self._code_diff = None
         self._step = None
         self._tool = None
         self._provenance = None
         self._request = None
         self._seq = 0
+
+    def set_cost_cap(self, cap_usd):
+        """Stop this run before any call once its estimated cost reaches `cap_usd`."""
+        self.cost_cap_usd = cap_usd
+
+    def check_budget(self):
+        """Raise before a call that would start once the run is at its cap.
+
+        The check comes before a call, so the call that crosses the cap still
+        completes: a run can overshoot by at most one call. Calls LiteLLM could
+        not price add nothing here, so the guard is only as good as its price
+        table; `cost_unavailable_calls` says when it was blind.
+        """
+        if not self.active or self.cost_cap_usd is None:
+            return
+        if self.usage["cost_usd"] >= self.cost_cap_usd:
+            self._event(
+                "budget_exceeded",
+                cost_usd=self.usage["cost_usd"],
+                cap_usd=self.cost_cap_usd,
+            )
+            raise RunBudgetExceeded(
+                f"run cost ${self.usage['cost_usd']:.4f} reached its cap "
+                f"${self.cost_cap_usd:.2f}"
+            )
 
     def set_context(self, step, tool):
         """Attribute subsequent captures to one agent step and tool."""
@@ -302,10 +366,11 @@ class ImageRecorder:
             "model_name", "temperature", "reasoning_effort", "max_steps",
             "max_tokens", "max_retries", "seed", "frame_sampling_factor",
             "overview_base", "skim_base", "focus_base", "tools",
-            "api_base", "api_version",
+            "api_base", "api_version", "max_run_cost_usd",
         )
         prompt = config.get("SYSTEM_PROMPT") or ""
         self.settings = {key: config.get(key) for key in keys}
+        self.settings["code"], self._code_diff = code_snapshot()
         self.settings["api_key_present"] = config.get("api_key") is not None
         self.settings["system_prompt_sha256"] = hashlib.sha256(
             prompt.encode("utf-8")
@@ -327,6 +392,10 @@ class ImageRecorder:
         )
         self._write("usage.json", self.usage)
         self._write("settings.json", self.settings)
+        if self._code_diff:
+            # Kept beside the run so its exact code can be rebuilt from the
+            # commit in settings.json; `diff_sha256` there identifies it.
+            (self.run_dir / "code.diff").write_text(self._code_diff, encoding="utf-8")
 
     def _write(self, name, payload):
         (self.run_dir / name).write_text(

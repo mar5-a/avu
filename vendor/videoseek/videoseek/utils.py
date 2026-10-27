@@ -134,6 +134,26 @@ def extract_thought(response) -> tuple:
     return "", "empty"
 
 
+def question_context_block(question_context) -> str:
+    """The run's question as a worker sees it, or nothing when there is none.
+
+    Upstream gives `skim` and `focus` only the query the planner wrote. A query
+    such as "Does Event A or Event B occur right after Event C?" then reaches the
+    worker with its labels undefined, and a paraphrased query can drop the
+    detail that tells two similar scenes apart. The question stem carries the
+    event definitions; the answer options stay out, because choosing an option
+    is the planner's job, not a worker's.
+    """
+    if not question_context:
+        return ""
+    return (
+        "Context: the overall question this video is being searched for. Use it to "
+        "interpret the question below, for example what an event label refers to, "
+        "but answer only the question below.\n"
+        f"{question_context}\n\n"
+    )
+
+
 def call_llm_api(*args, **kwargs) -> dict:
     """Single entry point: record the outgoing request, then call with retries.
 
@@ -142,6 +162,7 @@ def call_llm_api(*args, **kwargs) -> dict:
     returns is counted by the retry wrapper, which knows why it stopped, so
     every call the agent made is accounted for exactly once.
     """
+    recorder.check_budget()
     recorder.record_request(kwargs)
     recorder.capture(kwargs.get("messages") or [])
     response = _call_llm_api(*args, **kwargs)

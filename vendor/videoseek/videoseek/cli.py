@@ -36,6 +36,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "same video can collide on."
         ),
     )
+    p.add_argument(
+        "--question_context",
+        default=None,
+        help=(
+            "Question text shown to the skim and focus workers beside the planner's "
+            "query, without the answer options. Upstream sends them the query alone."
+        ),
+    )
     p.add_argument("--verbose", action="store_true", help="Print agent step logs.")
 
     # Allow overriding general.yaml keys (optional)
@@ -48,6 +56,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--temperature", type=float, default=general_config['temperature'], help="Temperature.")
     p.add_argument("--max_tokens", type=int, default=general_config['max_tokens'], help="Max output tokens of the LLM.")
     p.add_argument("--max_steps", type=int, default=general_config['max_steps'], help="Max steps of the VideoSeek agent.")
+    p.add_argument("--max_run_cost_usd", type=float, default=general_config['max_run_cost_usd'], help="Stop the run before any call once its estimated cost reaches this.")
     return p.parse_args(argv)
 
 
@@ -69,6 +78,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     recorder.start(run_dir)
     recorder.record_settings(config)
+    recorder.settings["question_context_sent"] = args.question_context is not None
+    recorder.set_cost_cap(config["max_run_cost_usd"])
 
     # Run the agent
     agent = VideoSeekAgent(
@@ -78,6 +89,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         output_dir=str(output_dir),
         tools=config["tools"],
         verbose=args.verbose,
+        question_context=args.question_context,
     )
     traj_dict = None
     try:

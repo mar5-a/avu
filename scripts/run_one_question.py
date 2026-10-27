@@ -4,6 +4,10 @@ The benchmark's answer key and evidence annotations are written to the run
 directory for our own inspection and are never placed in the prompt. The model
 sees the question stem and the four options, and nothing else.
 
+The run directory is claimed here and passed down, rather than discovered
+afterwards by looking at what appeared in the output directory: with two runs
+in flight that guess can name the other run's directory.
+
 Usage:
     .venv/bin/python scripts/run_one_question.py --question-id 257
 """
@@ -40,17 +44,49 @@ def build_query(row: dict) -> str:
     )
 
 
+def video_properties(path: Path) -> dict:
+    """Frames, rate, duration and pixel size of the source video.
+
+    Recorded because nothing else in a run captures it, and the frames the model
+    saw depend on it: `focus` sends frames unresized, so a video that was
+    downloaded at a lower resolution is a caveat on any fine-detail claim.
+    """
+    from decord import VideoReader
+
+    reader = VideoReader(str(path))
+    fps = reader.get_avg_fps()
+    frames = len(reader)
+    height, width = reader[0].shape[:2]
+    return {
+        "frames": frames,
+        "fps": round(fps, 3),
+        "duration_sec": round(frames / fps, 2),
+        "width": width,
+        "height": height,
+        "bytes": path.stat().st_size,
+    }
+
+
 def run_name(row: dict) -> str:
     """A readable run directory name: `q257-temporal-ordering-2026-09-19`."""
     return f"q{row['id']}-{row['task'].replace('_', '-')}-{time.strftime('%Y-%m-%d')}"
 
 
-def unique_run_dir(output_dir: Path, row: dict) -> Path:
-    """The run name, suffixed if a run of the same question already exists today."""
-    base, name, n = run_name(row), run_name(row), 2
-    while (output_dir / name).exists():
-        name, n = f"{base}-{n}", n + 1
-    return output_dir / name
+def allocate_run_dir(output_dir: Path, row: dict) -> Path:
+    """Claim today's run name for this question, suffixing if it is taken.
+
+    Claimed with `exist_ok=False` so that two runs starting together cannot both
+    believe they own the same directory.
+    """
+    base = run_name(row)
+    for n in range(1, 1000):
+        candidate = output_dir / (base if n == 1 else f"{base}-{n}")
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise SystemExit(f"too many runs of {base} under {output_dir}")
 
 
 def main() -> int:
@@ -76,31 +112,22 @@ def main() -> int:
     print(f"evidence {spans}")
     print("-" * 70)
 
+    run_dir = allocate_run_dir(args.output_dir, row)
     argv = [
         "--video_path", str(video),
         "--user_query", query,
         "--output_dir", str(args.output_dir),
+        "--run_dir", str(run_dir),
         "--verbose",
     ]
     if args.max_steps is not None:
         argv += ["--max_steps", str(args.max_steps)]
 
-    before = set(args.output_dir.iterdir())
-
-    def finalize_run():
-        """Rename the run to something readable, then write the answer key.
-
-        cli.main names its own directory `<video_id>_<unix_ts>`, which is opaque and
-        doesn't identify the question — one video can carry several. Renaming here
-        leaves upstream untouched, and doing it in a finally keeps a failed run
-        findable by name. The directory this run created is found by diffing the
-        output dir, so a concurrent run can't be mistaken for it.
-        """
-        created = [p for p in args.output_dir.iterdir() if p not in before and p.is_dir()]
-        if not created:
-            return None
-        run_dir = max(created, key=lambda p: p.stat().st_mtime)
-        run_dir = run_dir.rename(unique_run_dir(args.output_dir, row))
+    try:
+        rc = cli_main(argv)
+    finally:
+        # The answer key is kept next to the run whatever happened to it, so a
+        # failed attempt is still readable and still comparable.
         (run_dir / "question.json").write_text(
             json.dumps(
                 {
@@ -110,6 +137,7 @@ def main() -> int:
                     "dataset": row["dataset"],
                     "source_question_id": row["source_question_id"],
                     "video_id": row["video_id"],
+                    "video": video_properties(video),
                     "question": row["question"],
                     "options": row["options"],
                     "answer": row["answer"],
@@ -121,14 +149,18 @@ def main() -> int:
             ),
             encoding="utf-8",
         )
-        return run_dir
-
-    try:
-        rc = cli_main(argv)
-    finally:
-        run_dir = finalize_run()
     print("-" * 70)
     print(f"run dir: {run_dir}")
+    # A run whose tools raised still produces an answer, from whatever was left —
+    # which may be nothing but the question. Say so rather than let it pass as a
+    # quiet model mistake.
+    manifest = run_dir / "images.json"
+    if manifest.is_file():
+        for error in json.loads(manifest.read_text()).get("tool_errors") or []:
+            print(
+                f"WARNING: {error['tool']} raised {error['error_type']}: "
+                f"{error['error'][:120]} — this run's answer may rest on no evidence"
+            )
     return rc
 
 

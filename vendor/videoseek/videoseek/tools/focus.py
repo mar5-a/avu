@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 
 from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+from videoseek.recorder import recorder
 from config import general_config
 
 
@@ -42,8 +43,11 @@ def execute_focus(config: dict, parameters: dict) -> str:
     Execute the focus tool.
     """
     query = parameters["query"]
-    start_time = parameters["start_time"]
-    end_time = parameters["end_time"]
+    # The model does not always honour the schema's number type: one run arrived
+    # with `"start_time": "100"`, which raised on the sampling arithmetic before
+    # any call was made, leaving the run to answer from the question alone.
+    start_time = float(parameters["start_time"])
+    end_time = float(parameters["end_time"])
     max_num_frames = general_config["frame_sampling_factor"] * general_config["focus_base"]
     vr = parameters["vr"]
     subtitles = parameters["subtitles"]
@@ -88,6 +92,22 @@ def execute_focus(config: dict, parameters: dict) -> str:
                 "If the clip is not related to the question, please return 'No relevant content found.'"
             )
         }
+    )
+
+    # Which source frame each image shows. Focus sends one frame per image, so one
+    # entry per index; the labels are rounded to 0.1s, these are not.
+    fps = vr.get_avg_fps()
+    recorder.set_provenance(
+        [
+            {
+                "frame_indices": [int(index)],
+                "timestamps_sec": [round(int(index) / fps, 6)],
+                "grid": None,
+            }
+            for index in frame_indices
+        ],
+        avg_fps=fps,
+        total_frames=len(vr),
     )
 
     response = call_llm_api(

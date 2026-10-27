@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image
 
 from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
+from videoseek.recorder import recorder
 from config import general_config
 
 
@@ -100,8 +101,25 @@ def execute_overview(config: dict, parameters: dict) -> str:
             ),
         }
     )
+    # Which source frames each merged sheet shows, in row-major cell order. The
+    # visible labels are rounded to 0.1s, which is too coarse to score coverage
+    # against evidence intervals, so the recorder gets the indices themselves.
+    fps = vr.get_avg_fps()
+    recorder.set_provenance(
+        [
+            {
+                "frame_indices": [int(index) for index in group],
+                "timestamps_sec": [round(int(index) / fps, 6) for index in group],
+                "grid": {"rows": 2, "cols": 4},
+            }
+            for group in frame_indices.reshape(-1, group_size)
+        ],
+        avg_fps=fps,
+        total_frames=total_frames,
+    )
+
     response = call_llm_api(
-        messages=[{ "role": "user", "content": content }],
+        messages=[{ "role": "user", "content": content}],
         model_name=config['model_name'],
         api_base=config['api_base'],
         api_key=config['api_key'],

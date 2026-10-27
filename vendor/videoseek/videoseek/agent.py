@@ -265,7 +265,15 @@ class VideoSeekAgent(BaseAgent):
                 try:
                     outcome = self.__exec_action(action)
                 except Exception as e:
-                    outcome = "Tool execution failed."
+                    # "Tool execution failed." alone reads the same whether the
+                    # model chose badly or the run is broken, so keep the reason
+                    # both in the observation and in the run's record.
+                    outcome = f"Tool execution failed: {type(e).__name__}: {e}"
+                    recorder.record_tool_error(
+                        tool=action.function_name,
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
                 if self.verbose:
                     print(f"[STEP {step+1} / {self.max_steps}] OBSERVATION")
                     print(outcome)
@@ -274,15 +282,17 @@ class VideoSeekAgent(BaseAgent):
                 if action.parameters is not None:
                     action.parameters.pop("vr", None)
                     action.parameters.pop("subtitles", None)
-                self.trajectory_steps.append(
-                    TrajectoryStep(
-                        step_id=step + 1,
-                        thought=thought,
-                        action=action,
-                        observation=observation,
-                        thought_source=thought_source,
-                    )
+                step_record = TrajectoryStep(
+                    step_id=step + 1,
+                    thought=thought,
+                    action=action,
+                    observation=observation,
+                    thought_source=thought_source,
                 )
+                self.trajectory_steps.append(step_record)
+                # Written as the step happens: a run that dies before returning
+                # still leaves its transcript on disk.
+                recorder.record_step(step_record.to_dict())
                 if action.function_name == "answer":
                     self.final_answer = observation.outcome
                     break
@@ -338,6 +348,7 @@ class VideoSeekAgent(BaseAgent):
             # function call rather than prose, leaving content empty.
             self.final_answer, _ = extract_thought(response)
             self.messages.append({"role": "assistant", "content": self.final_answer})
+            recorder.record_finish(self.final_answer, "reach_max_steps")
             return Trajectory(
                 question=question,
                 steps=self.trajectory_steps,
@@ -345,6 +356,7 @@ class VideoSeekAgent(BaseAgent):
                 finish_reason="reach_max_steps",
             )
 
+        recorder.record_finish(self.final_answer, "stop")
         return Trajectory(
             question=question,
             steps=self.trajectory_steps,

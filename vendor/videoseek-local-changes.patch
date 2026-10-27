@@ -1,6 +1,6 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
---- a/config/__init__.py	2026-09-19 16:32:46
-+++ b/config/__init__.py	2026-09-19 18:52:01
+--- a/config/__init__.py	2026-09-21 02:23:15
++++ b/config/__init__.py	2026-09-21 02:23:15
 @@ -3,7 +3,9 @@
  import argparse
  from pathlib import Path
@@ -28,8 +28,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  general_config = load_config(str(CONFIG_DIR / "general.yaml"))
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
---- a/config/general.yaml	2026-09-19 16:32:46
-+++ b/config/general.yaml	2026-09-19 18:52:01
+--- a/config/general.yaml	2026-09-21 02:23:15
++++ b/config/general.yaml	2026-09-21 02:23:15
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
 -api_base: "OPENAI_API_BASE"
@@ -45,8 +45,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  reasoning_effort: "medium"
  seed: 42
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml	2026-09-19 16:32:46
-+++ b/pyproject.toml	2026-09-19 18:52:01
+--- a/pyproject.toml	2026-09-21 02:23:15
++++ b/pyproject.toml	2026-09-21 02:23:15
 @@ -9,13 +9,15 @@
  readme = "README.md"
  requires-python = ">=3.10"
@@ -66,8 +66,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
---- a/videoseek/agent.py	2026-09-19 16:32:46
-+++ b/videoseek/agent.py	2026-09-19 18:52:01
+--- a/videoseek/agent.py	2026-09-21 02:23:15
++++ b/videoseek/agent.py	2026-09-21 02:23:15
 @@ -5,8 +5,14 @@
  from decord import VideoReader
  
@@ -104,7 +104,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                          },
                      }
                      for action in actions
-@@ -253,6 +261,7 @@
+@@ -253,10 +261,19 @@
              # OBSERVATIONS
              ############################################################
              for action in actions:
@@ -112,15 +112,45 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  try:
                      outcome = self.__exec_action(action)
                  except Exception as e:
-@@ -271,6 +280,7 @@
-                         thought=thought,
-                         action=action,
-                         observation=observation,
-+                        thought_source=thought_source,
-                     )
+-                    outcome = "Tool execution failed."
++                    # "Tool execution failed." alone reads the same whether the
++                    # model chose badly or the run is broken, so keep the reason
++                    # both in the observation and in the run's record.
++                    outcome = f"Tool execution failed: {type(e).__name__}: {e}"
++                    recorder.record_tool_error(
++                        tool=action.function_name,
++                        error=str(e),
++                        error_type=type(e).__name__,
++                    )
+                 if self.verbose:
+                     print(f"[STEP {step+1} / {self.max_steps}] OBSERVATION")
+                     print(outcome)
+@@ -265,14 +282,17 @@
+                 if action.parameters is not None:
+                     action.parameters.pop("vr", None)
+                     action.parameters.pop("subtitles", None)
+-                self.trajectory_steps.append(
+-                    TrajectoryStep(
+-                        step_id=step + 1,
+-                        thought=thought,
+-                        action=action,
+-                        observation=observation,
+-                    )
++                step_record = TrajectoryStep(
++                    step_id=step + 1,
++                    thought=thought,
++                    action=action,
++                    observation=observation,
++                    thought_source=thought_source,
                  )
++                self.trajectory_steps.append(step_record)
++                # Written as the step happens: a run that dies before returning
++                # still leaves its transcript on disk.
++                recorder.record_step(step_record.to_dict())
                  if action.function_name == "answer":
-@@ -324,7 +334,9 @@
+                     self.final_answer = observation.outcome
+                     break
+@@ -324,8 +344,11 @@
                  seed=self.seed,
                  temperature=self.temperature,
              )
@@ -129,11 +159,21 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            # function call rather than prose, leaving content empty.
 +            self.final_answer, _ = extract_thought(response)
              self.messages.append({"role": "assistant", "content": self.final_answer})
++            recorder.record_finish(self.final_answer, "reach_max_steps")
              return Trajectory(
                  question=question,
+                 steps=self.trajectory_steps,
+@@ -333,6 +356,7 @@
+                 finish_reason="reach_max_steps",
+             )
+ 
++        recorder.record_finish(self.final_answer, "stop")
+         return Trajectory(
+             question=question,
+             steps=self.trajectory_steps,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
---- a/videoseek/cli.py	2026-09-19 16:32:46
-+++ b/videoseek/cli.py	2026-09-19 18:52:01
+--- a/videoseek/cli.py	2026-09-21 02:23:15
++++ b/videoseek/cli.py	2026-09-21 02:23:15
 @@ -6,6 +6,7 @@
  
  from config import general_config, init_config, prompts_config
@@ -142,32 +182,86 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
  
  def build_agent_config(args: argparse.Namespace) -> dict:
-@@ -54,6 +55,9 @@
-     run_dir = output_dir / run_id
-     run_dir.mkdir(parents=True, exist_ok=True)
+@@ -26,6 +27,15 @@
+         default="./output/",
+         help="Directory to write outputs (default: ./output/).",
+     )
++    p.add_argument(
++        "--run_dir",
++        default=None,
++        help=(
++            "Explicit directory for this run's artifacts. Defaults to "
++            "<output_dir>/<video_id>_<timestamp>, which two concurrent runs of the "
++            "same video can collide on."
++        ),
++    )
+     p.add_argument("--verbose", action="store_true", help="Print agent step logs.")
  
+     # Allow overriding general.yaml keys (optional)
+@@ -48,11 +58,17 @@
+ 
+     config = build_agent_config(args)
+ 
+-    video_id = args.video_path.split("/")[-1].split(".")[0]
++    if args.run_dir:
++        run_dir = Path(args.run_dir).expanduser().resolve()
++        run_dir.mkdir(parents=True, exist_ok=True)
++    else:
++        video_id = args.video_path.split("/")[-1].split(".")[0]
++        run_id = f"{video_id}_{int(time.time())}"
++        run_dir = output_dir / run_id
++        run_dir.mkdir(parents=True, exist_ok=True)
+ 
+-    run_id = f"{video_id}_{int(time.time())}"
+-    run_dir = output_dir / run_id
+-    run_dir.mkdir(parents=True, exist_ok=True)
 +    recorder.start(run_dir)
 +    recorder.record_settings(config)
-+
+ 
      # Run the agent
      agent = VideoSeekAgent(
-         config=config,
-@@ -63,7 +67,11 @@
+@@ -63,15 +79,34 @@
          tools=config["tools"],
          verbose=args.verbose,
      )
 -    traj = agent.run(args.user_query)
+-    traj_dict = traj.to_dict()
+-    prediction = traj_dict.get("final_answer", "")
++    traj_dict = None
 +    try:
 +        traj = agent.run(args.user_query)
++        traj_dict = traj.to_dict()
++    except Exception as e:
++        # A crash on step 7 must not cost the six steps that already happened:
++        # the partial transcript is what separates a model mistake from a broken
++        # run. Recorded, then the exception continues on its way.
++        traj_dict = {
++            "question": args.user_query,
++            "steps": [step.to_dict() for step in agent.trajectory_steps],
++            "final_answer": agent.final_answer,
++            "finish_reason": "error",
++            "error": f"{type(e).__name__}: {e}",
++        }
++        raise
 +    finally:
-+        # Retain what the run saw even if it failed partway through.
 +        recorder.write_manifest()
-     traj_dict = traj.to_dict()
-     prediction = traj_dict.get("final_answer", "")
++        (run_dir / "trajectory.json").write_text(
++            json.dumps(traj_dict, ensure_ascii=False, indent=2), encoding="utf-8"
++        )
+ 
++    prediction = traj_dict.get("final_answer") or ""
++
+     print(f"Question: {args.user_query}")
+     print(f"Prediction: {prediction}")
+ 
+     (run_dir / "prediction.json").write_text(json.dumps({"prediction": prediction}, ensure_ascii=False, indent=2), encoding="utf-8")
+-    (run_dir / "trajectory.json").write_text(json.dumps(traj_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+ 
+     return 0
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
---- a/videoseek/core/trajectory.py	2026-09-19 16:32:46
-+++ b/videoseek/core/trajectory.py	2026-09-19 18:52:01
+--- a/videoseek/core/trajectory.py	2026-09-21 02:23:15
++++ b/videoseek/core/trajectory.py	2026-09-21 02:23:15
 @@ -6,16 +6,20 @@
  class TrajectoryStep:
      """A single step in the agent trajectory."""
@@ -192,24 +286,45 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-09-19 18:52:01
-@@ -0,0 +1,158 @@
-+"""Record the exact images a run sends to the model, so it can be replayed.
++++ b/videoseek/recorder.py	2026-09-21 02:23:15
+@@ -0,0 +1,350 @@
++"""Record exactly what a run sent to the model, so it can be audited and replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
 +place worth instrumenting: whatever content a tool builds, the bytes that
 +actually left the process are captured here in order, each with the text block
 +that immediately preceded it (its visible time label).
 +
-+The manifest keeps the full ordered block structure of every image-bearing call,
-+not just the images, so a later request can be rebuilt without guessing at what
-+surrounded them.
++Three levels of detail, because they answer different questions:
++
++- `images.json` — the bytes, their order, and their labels. This is what a
++  replay reads: it can rebuild a request from `images` and their labels without
++  guessing at anything.
++- Provenance on each image — which decoded source frames it shows, as exact
++  frame indices and unrounded timestamps, plus the grid layout for the 2x4 sheets
++  `overview` merges. Scoring needs frame identity rather than visible labels:
++  two frames can round to the same 0.1s, and the benchmark's evidence intervals
++  are in seconds. Where a tool supplies no provenance the field is null, and a
++  count mismatch is recorded as an event rather than papered over.
++- `events.jsonl` — appended as the run proceeds, one line per model-call
++  attempt, capture, and agent step. A run that dies mid-flight (process killed,
++  API error past its retries) still leaves a readable record of what it had done.
++
++`images.json` also keeps the full ordered block structure of every image-bearing
++call. That is a faithful record of the request, not a replay template: it holds
++text the agent generated for itself, such as the per-call search query, which a
++replay must not inherit. Replays build from `images` and their labels.
 +"""
 +
 +import base64
 +import hashlib
 +import json
++import time
 +from pathlib import Path
++
++# Token fields are summarised rather than guessed at: a field the provider did
++# not report is counted as missing, never added to a total as a zero.
++TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 +
 +
 +class ImageRecorder:
@@ -219,8 +334,13 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        self.calls = []
 +        self.usage = {}
 +        self.settings = {}
++        self.frame_space = None
 +        self._step = None
 +        self._tool = None
++        self._provenance = None
++        self._request = None
++        self._events = None
++        self._seq = 0
 +
 +    @property
 +    def active(self):
@@ -230,42 +350,101 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        """Begin recording into `run_dir`. Safe to call once per run."""
 +        self.run_dir = Path(run_dir)
 +        (self.run_dir / "images").mkdir(parents=True, exist_ok=True)
++        # Truncate rather than append: a rerun into an existing directory must not
++        # inherit the previous run's events.
++        (self.run_dir / "events.jsonl").write_text("", encoding="utf-8")
++        self._events = None
 +        self.images = []
 +        self.calls = []
 +        self.usage = {
 +            "calls": 0,
 +            "calls_without_usage": 0,
++            "calls_failed": 0,
++            "incomplete_calls": 0,
++            "fields_missing": {field: 0 for field in TOKEN_FIELDS},
 +            "prompt_tokens": 0,
 +            "completion_tokens": 0,
 +            "reasoning_tokens": 0,
 +            "total_tokens": 0,
 +            "cost_usd": 0.0,
 +            "cost_unavailable_calls": 0,
++            # Token accounting only: true when no call failed and no reported
++            # field was missing. Price availability is not part of it.
++            "complete": True,
 +        }
++        self.frame_space = None
++        self.tool_errors = []
 +        self._step = None
 +        self._tool = None
++        self._provenance = None
++        self._request = None
++        self._seq = 0
 +
 +    def set_context(self, step, tool):
 +        """Attribute subsequent captures to one agent step and tool."""
 +        self._step = step
 +        self._tool = tool
 +
++    def set_provenance(self, entries, avg_fps=None, total_frames=None):
++        """Frame identity behind the images of the next call, one entry per image.
++
++        The tools know which decoded frames they sampled; this recorder only ever
++        sees base64. Passing the indices across is what makes coverage scorable
++        without re-decoding the video and matching JPEG bytes afterwards. For a
++        merged grid, `frame_indices` is in row-major cell order, so
++        `frame_indices[row * cols + col]` is the frame in that cell.
++        """
++        if not self.active:
++            return
++        self._provenance = list(entries)
++        space = {"avg_fps": avg_fps, "total_frames": total_frames}
++        if self.frame_space is None:
++            self.frame_space = space
++        elif self.frame_space != space:
++            # Two different frame spaces in one run would silently corrupt every
++            # timestamp; say so instead.
++            self._event("frame_space_changed", was=self.frame_space, now=space)
++
++    def record_request(self, kwargs):
++        """Describe one outgoing call: shape and settings, never the API key."""
++        if not self.active:
++            return
++        tools = kwargs.get("tools") or []
++        request = {
++            "messages": len(kwargs.get("messages") or []),
++            "tools": [t.get("function", {}).get("name") for t in tools],
++            "tool_choice": kwargs.get("tool_choice"),
++            "temperature": kwargs.get("temperature"),
++            "reasoning_effort": kwargs.get("reasoning_effort"),
++            # The callers name this `max_tokens`; it reaches the provider as
++            # `max_completion_tokens`.
++            "max_tokens": kwargs.get("max_completion_tokens", kwargs.get("max_tokens")),
++            "json_output": bool(kwargs.get("return_json") or kwargs.get("response_format")),
++        }
++        self._request = request
++        self._event("request", **request)
++
 +    def capture(self, messages):
 +        """Save every image in `messages`, preserving order and labels."""
 +        if not self.active:
 +            return
++        provenance = self._provenance
++        self._provenance = None
++        start_index = len(self.images)
 +        for message in messages:
 +            content = message.get("content")
 +            if not isinstance(content, list):
 +                continue
-+            blocks = None
++            # Every block, from the first one: the text preceding the first image
++            # is part of the request too, and dropping it made the recorded
++            # structure disagree with what the model received.
++            blocks = []
 +            label = None
 +            for block in content:
 +                kind = block.get("type")
 +                if kind == "text":
 +                    label = block.get("text")
-+                    if blocks is not None:
-+                        blocks.append({"type": "text", "text": label})
++                    blocks.append({"type": "text", "text": label})
 +                elif kind == "image_url":
 +                    raw = base64.b64decode(block["image_url"]["url"].partition(",")[2])
 +                    index = len(self.images)
@@ -280,15 +459,36 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +                            "label": label,
 +                            "sha256": hashlib.sha256(raw).hexdigest(),
 +                            "bytes": len(raw),
++                            "provenance": None,
 +                        }
 +                    )
-+                    if blocks is None:
-+                        blocks = []
 +                    blocks.append({"type": "image", "index": index})
-+            if blocks is not None:
++            if any(block["type"] == "image" for block in blocks):
 +                self.calls.append(
-+                    {"step": self._step, "tool": self._tool, "blocks": blocks}
++                    {
++                        "step": self._step,
++                        "tool": self._tool,
++                        "request": self._request,
++                        "blocks": blocks,
++                    }
 +                )
++        self._request = None
++        captured = self.images[start_index:]
++        if provenance is None:
++            # Not every image-bearing call comes from a tool that knows, or
++            # records, its frame indices. Null provenance is an answer, not a
++            # failure; a count mismatch is a failure.
++            return
++        if len(provenance) == len(captured):
++            for entry, frames in zip(captured, provenance):
++                entry["provenance"] = frames
++        else:
++            self._event(
++                "provenance_mismatch",
++                expected=len(provenance),
++                captured=len(captured),
++                first_image=start_index,
++            )
 +
 +    def record_usage(self, response):
 +        """Accumulate token counts and cost from one model response."""
@@ -297,11 +497,24 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        usage = getattr(response, "usage", None)
 +        if usage is None:
 +            self.usage["calls_without_usage"] += 1
++            self.usage["complete"] = False
++            self._event("usage_missing")
 +            return
 +        self.usage["calls"] += 1
-+        self.usage["prompt_tokens"] += getattr(usage, "prompt_tokens", 0) or 0
-+        self.usage["completion_tokens"] += getattr(usage, "completion_tokens", 0) or 0
-+        self.usage["total_tokens"] += getattr(usage, "total_tokens", 0) or 0
++        missing = [
++            field
++            for field in TOKEN_FIELDS
++            if getattr(usage, field, None) is None
++        ]
++        for field in missing:
++            self.usage["fields_missing"][field] += 1
++        if missing:
++            self.usage["incomplete_calls"] += 1
++            self.usage["complete"] = False
++        for field in TOKEN_FIELDS:
++            value = getattr(usage, field, None)
++            if value is not None:
++                self.usage[field] += value
 +        details = getattr(usage, "completion_tokens_details", None)
 +        if details is not None:
 +            self.usage["reasoning_tokens"] += getattr(details, "reasoning_tokens", 0) or 0
@@ -311,7 +524,60 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            self.usage["cost_usd"] += litellm.completion_cost(completion_response=response)
 +        except Exception:
 +            # Unknown model or missing pricing: report tokens, don't invent a cost.
++            # Cost has its own counter rather than flipping `complete`: the token
++            # totals are still trustworthy when only the price is unknown.
 +            self.usage["cost_unavailable_calls"] += 1
++        self._event(
++            "usage",
++            prompt_tokens=getattr(usage, "prompt_tokens", None),
++            completion_tokens=getattr(usage, "completion_tokens", None),
++            total_tokens=getattr(usage, "total_tokens", None),
++            missing=missing,
++        )
++
++    def record_attempt(self, status, error=None, error_type=None, elapsed_sec=None, delay=None):
++        """Record one model-call attempt: `retry`, `gave_up` or `failed`."""
++        if not self.active:
++            return
++        if status != "retry":
++            # The call never returned. Its usage is unknown, not zero.
++            self.usage["calls_failed"] += 1
++            self.usage["complete"] = False
++        self._event(
++            "attempt",
++            status=status,
++            error=None if error is None else str(error)[:2000],
++            error_type=error_type,
++            elapsed_sec=None if elapsed_sec is None else round(elapsed_sec, 3),
++            delay=None if delay is None else round(delay, 3),
++        )
++
++    def record_tool_error(self, tool, error, error_type):
++        """Record a tool that raised.
++
++        Without this, a broken tool and a model that chose badly look identical in
++        the trajectory: both leave "Tool execution failed." A pilot was run where
++        every frame fetch raised on an undecodable video and the answers came from
++        the question text alone, which read as an ordinary run.
++        """
++        if not self.active:
++            return
++        self.tool_errors.append(
++            {"tool": tool, "error": str(error)[:2000], "error_type": error_type}
++        )
++        self._event("tool_error", tool=tool, error=str(error)[:2000], error_type=error_type)
++
++    def record_step(self, step):
++        """Record one agent step as it completes, so a crash keeps the transcript."""
++        if not self.active:
++            return
++        self._event("step", step=step.get("step_id"), payload=step)
++
++    def record_finish(self, final_answer, finish_reason):
++        """Record how the run ended, so the answer survives without the trajectory."""
++        if not self.active:
++            return
++        self._event("finish", final_answer=final_answer, finish_reason=finish_reason)
 +
 +    def record_settings(self, config):
 +        """Save the settings a run used, so two runs can be compared.
@@ -339,22 +605,176 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +    def write_manifest(self):
 +        if not self.active:
 +            return
-+        payload = {"image_count": len(self.images), "images": self.images, "calls": self.calls}
-+        (self.run_dir / "images.json").write_text(
++        self._write(
++            "images.json",
++            {
++                "image_count": len(self.images),
++                "frame_space": self.frame_space,
++                "tool_errors": self.tool_errors,
++                "images": self.images,
++                "calls": self.calls,
++            },
++        )
++        self._write("usage.json", self.usage)
++        self._write("settings.json", self.settings)
++
++    def _write(self, name, payload):
++        (self.run_dir / name).write_text(
 +            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
 +        )
-+        (self.run_dir / "usage.json").write_text(
-+            json.dumps(self.usage, ensure_ascii=False, indent=2), encoding="utf-8"
-+        )
-+        (self.run_dir / "settings.json").write_text(
-+            json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8"
-+        )
++
++    def _event(self, kind, **fields):
++        if not self.active:
++            return
++        if self._events is None:
++            self._events = open(self.run_dir / "events.jsonl", "a", encoding="utf-8")
++        self._seq += 1
++        record = {"seq": self._seq, "kind": kind, "t": round(time.time(), 3),
++                  "step": self._step, "tool": self._tool}
++        record.update(fields)
++        self._events.write(json.dumps(record, ensure_ascii=False) + "\n")
++        # Flush per event: the point of this file is to survive a hard kill.
++        self._events.flush()
 +
 +
 +recorder = ImageRecorder()
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/focus.py b/videoseek/tools/focus.py
+--- a/videoseek/tools/focus.py	2026-09-21 02:23:15
++++ b/videoseek/tools/focus.py	2026-09-21 02:23:15
+@@ -5,6 +5,7 @@
+ from PIL import Image
+ 
+ from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
++from videoseek.recorder import recorder
+ from config import general_config
+ 
+ 
+@@ -42,8 +43,11 @@
+     Execute the focus tool.
+     """
+     query = parameters["query"]
+-    start_time = parameters["start_time"]
+-    end_time = parameters["end_time"]
++    # The model does not always honour the schema's number type: one run arrived
++    # with `"start_time": "100"`, which raised on the sampling arithmetic before
++    # any call was made, leaving the run to answer from the question alone.
++    start_time = float(parameters["start_time"])
++    end_time = float(parameters["end_time"])
+     max_num_frames = general_config["frame_sampling_factor"] * general_config["focus_base"]
+     vr = parameters["vr"]
+     subtitles = parameters["subtitles"]
+@@ -88,6 +92,22 @@
+                 "If the clip is not related to the question, please return 'No relevant content found.'"
+             )
+         }
++    )
++
++    # Which source frame each image shows. Focus sends one frame per image, so one
++    # entry per index; the labels are rounded to 0.1s, these are not.
++    fps = vr.get_avg_fps()
++    recorder.set_provenance(
++        [
++            {
++                "frame_indices": [int(index)],
++                "timestamps_sec": [round(int(index) / fps, 6)],
++                "grid": None,
++            }
++            for index in frame_indices
++        ],
++        avg_fps=fps,
++        total_frames=len(vr),
+     )
+ 
+     response = call_llm_api(
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/overview.py b/videoseek/tools/overview.py
+--- a/videoseek/tools/overview.py	2026-09-21 02:23:15
++++ b/videoseek/tools/overview.py	2026-09-21 02:23:15
+@@ -5,6 +5,7 @@
+ from PIL import Image
+ 
+ from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
++from videoseek.recorder import recorder
+ from config import general_config
+ 
+ 
+@@ -100,8 +101,25 @@
+             ),
+         }
+     )
++    # Which source frames each merged sheet shows, in row-major cell order. The
++    # visible labels are rounded to 0.1s, which is too coarse to score coverage
++    # against evidence intervals, so the recorder gets the indices themselves.
++    fps = vr.get_avg_fps()
++    recorder.set_provenance(
++        [
++            {
++                "frame_indices": [int(index) for index in group],
++                "timestamps_sec": [round(int(index) / fps, 6) for index in group],
++                "grid": {"rows": 2, "cols": 4},
++            }
++            for group in frame_indices.reshape(-1, group_size)
++        ],
++        avg_fps=fps,
++        total_frames=total_frames,
++    )
++
+     response = call_llm_api(
+-        messages=[{ "role": "user", "content": content }],
++        messages=[{ "role": "user", "content": content}],
+         model_name=config['model_name'],
+         api_base=config['api_base'],
+         api_key=config['api_key'],
+diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/skim.py b/videoseek/tools/skim.py
+--- a/videoseek/tools/skim.py	2026-09-21 02:23:15
++++ b/videoseek/tools/skim.py	2026-09-21 02:23:15
+@@ -5,6 +5,7 @@
+ from PIL import Image
+ 
+ from videoseek.utils import call_llm_api, convert_to_free_form_text_representation
++from videoseek.recorder import recorder
+ from config import general_config
+ 
+ 
+@@ -42,8 +43,11 @@
+     Execute the skim tool.
+     """
+     query = parameters["query"]
+-    start_time = parameters["start_time"]
+-    end_time = parameters["end_time"]
++    # The model does not always honour the schema's number type: one run arrived
++    # with `"start_time": "100"`, which raised on the sampling arithmetic before
++    # any call was made, leaving the run to answer from the question alone.
++    start_time = float(parameters["start_time"])
++    end_time = float(parameters["end_time"])
+     num_frames = general_config["frame_sampling_factor"] * general_config["skim_base"]
+     vr = parameters["vr"]
+     subtitles = parameters["subtitles"]
+@@ -105,6 +109,22 @@
+         "type": "text",
+         "text": f"Video Subtitles:\n{subtitles_str}\n\nQuestion:\n{query}\n\nPlease describe the content of the viewed video frames in detail with their timestamps (each frame with ~25 words). If query related content is found, please highlight the timestamps of the video frames that are relevant to the question and explain why (each timestamp with additional ~50 words). Do not answer the question directly.",
+     })
++
++    # Which source frame each image shows. Skim sends one frame per image, so one
++    # entry per index; the labels are rounded to 0.1s, these are not.
++    fps = vr.get_avg_fps()
++    recorder.set_provenance(
++        [
++            {
++                "frame_indices": [int(index)],
++                "timestamps_sec": [round(int(index) / fps, 6)],
++                "grid": None,
++            }
++            for index in frame_indices
++        ],
++        avg_fps=fps,
++        total_frames=len(vr),
++    )
+ 
+     response = call_llm_api(
+         messages=[{"role": "user", "content": content}],
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
---- a/videoseek/utils.py	2026-09-19 16:32:46
-+++ b/videoseek/utils.py	2026-09-19 18:52:01
+--- a/videoseek/utils.py	2026-09-21 02:23:15
++++ b/videoseek/utils.py	2026-09-21 02:23:15
 @@ -4,7 +4,9 @@
  import time
  from litellm import completion
@@ -365,7 +785,52 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  def retry_with_exponential_backoff(
      func,
      initial_delay: float = 1,
-@@ -56,7 +58,7 @@
+@@ -18,6 +20,7 @@
+         # Initialize variables
+         num_retries = 0
+         delay = initial_delay
++        started = time.monotonic()
+ 
+         # Loop until a successful response or max_retries is hit or an exception is raised
+         while True:
+@@ -40,15 +43,36 @@
+ 
+                     # Check if max retries has been reached
+                     if num_retries > max_retries:
++                        # The caller only sees None, so record why the call died:
++                        # otherwise the reason lives in stdout and nowhere else.
++                        recorder.record_attempt(
++                            "gave_up",
++                            error=e,
++                            error_type=type(e).__name__,
++                            elapsed_sec=time.monotonic() - started,
++                        )
+                         print("Max retries reached. Exiting.")
+                         return None
+ 
+                     # Increment the delay
+                     delay *= exponential_base * (1 + jitter * random.random())
++                    recorder.record_attempt(
++                        "retry",
++                        error=e,
++                        error_type=type(e).__name__,
++                        elapsed_sec=time.monotonic() - started,
++                        delay=delay,
++                    )
+                     print(f"Retrying in {delay} seconds for {str(e)}...")
+                     # Sleep for the delay
+                     time.sleep(delay)
+                 else:
++                    recorder.record_attempt(
++                        "failed",
++                        error=e,
++                        error_type=type(e).__name__,
++                        elapsed_sec=time.monotonic() - started,
++                    )
+                     print(str(e))
+                     return None
+ 
+@@ -56,7 +80,7 @@
  
  
  @retry_with_exponential_backoff
@@ -374,7 +839,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      model_name: str,
      messages: list,
      api_base: str,
-@@ -70,14 +72,13 @@
+@@ -70,14 +94,13 @@
      tool_choice: str = None,
      return_json: bool = False,
  ) -> dict:
@@ -390,7 +855,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=temperature,
          reasoning_effort=reasoning_effort,
          tools=tools,
-@@ -85,6 +86,42 @@
+@@ -85,6 +108,46 @@
          response_format={"type": "json_object"} if return_json else None,
          timeout=900,
      )
@@ -421,14 +886,18 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +
 +
 +def call_llm_api(*args, **kwargs) -> dict:
-+    """Single entry point: record the outgoing images, then call with retries.
++    """Single entry point: record the outgoing request, then call with retries.
 +
 +    Capturing here rather than inside the retried function keeps a retry from
-+    appending the same images to the manifest a second time.
++    appending the same images to the manifest a second time. A call that never
++    returns is counted by the retry wrapper, which knows why it stopped, so
++    every call the agent made is accounted for exactly once.
 +    """
++    recorder.record_request(kwargs)
 +    recorder.capture(kwargs.get("messages") or [])
 +    response = _call_llm_api(*args, **kwargs)
-+    recorder.record_usage(response)
++    if response is not None:
++        recorder.record_usage(response)
 +    return response
  
  

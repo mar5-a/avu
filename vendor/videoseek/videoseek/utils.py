@@ -20,6 +20,7 @@ def retry_with_exponential_backoff(
         # Initialize variables
         num_retries = 0
         delay = initial_delay
+        started = time.monotonic()
 
         # Loop until a successful response or max_retries is hit or an exception is raised
         while True:
@@ -42,15 +43,36 @@ def retry_with_exponential_backoff(
 
                     # Check if max retries has been reached
                     if num_retries > max_retries:
+                        # The caller only sees None, so record why the call died:
+                        # otherwise the reason lives in stdout and nowhere else.
+                        recorder.record_attempt(
+                            "gave_up",
+                            error=e,
+                            error_type=type(e).__name__,
+                            elapsed_sec=time.monotonic() - started,
+                        )
                         print("Max retries reached. Exiting.")
                         return None
 
                     # Increment the delay
                     delay *= exponential_base * (1 + jitter * random.random())
+                    recorder.record_attempt(
+                        "retry",
+                        error=e,
+                        error_type=type(e).__name__,
+                        elapsed_sec=time.monotonic() - started,
+                        delay=delay,
+                    )
                     print(f"Retrying in {delay} seconds for {str(e)}...")
                     # Sleep for the delay
                     time.sleep(delay)
                 else:
+                    recorder.record_attempt(
+                        "failed",
+                        error=e,
+                        error_type=type(e).__name__,
+                        elapsed_sec=time.monotonic() - started,
+                    )
                     print(str(e))
                     return None
 
@@ -113,14 +135,18 @@ def extract_thought(response) -> tuple:
 
 
 def call_llm_api(*args, **kwargs) -> dict:
-    """Single entry point: record the outgoing images, then call with retries.
+    """Single entry point: record the outgoing request, then call with retries.
 
     Capturing here rather than inside the retried function keeps a retry from
-    appending the same images to the manifest a second time.
+    appending the same images to the manifest a second time. A call that never
+    returns is counted by the retry wrapper, which knows why it stopped, so
+    every call the agent made is accounted for exactly once.
     """
+    recorder.record_request(kwargs)
     recorder.capture(kwargs.get("messages") or [])
     response = _call_llm_api(*args, **kwargs)
-    recorder.record_usage(response)
+    if response is not None:
+        recorder.record_usage(response)
     return response
 
 

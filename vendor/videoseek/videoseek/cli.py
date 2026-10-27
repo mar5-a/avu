@@ -27,6 +27,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default="./output/",
         help="Directory to write outputs (default: ./output/).",
     )
+    p.add_argument(
+        "--run_dir",
+        default=None,
+        help=(
+            "Explicit directory for this run's artifacts. Defaults to "
+            "<output_dir>/<video_id>_<timestamp>, which two concurrent runs of the "
+            "same video can collide on."
+        ),
+    )
     p.add_argument("--verbose", action="store_true", help="Print agent step logs.")
 
     # Allow overriding general.yaml keys (optional)
@@ -49,11 +58,14 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     config = build_agent_config(args)
 
-    video_id = args.video_path.split("/")[-1].split(".")[0]
-
-    run_id = f"{video_id}_{int(time.time())}"
-    run_dir = output_dir / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if args.run_dir:
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        run_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        video_id = args.video_path.split("/")[-1].split(".")[0]
+        run_id = f"{video_id}_{int(time.time())}"
+        run_dir = output_dir / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     recorder.start(run_dir)
     recorder.record_settings(config)
@@ -67,19 +79,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         tools=config["tools"],
         verbose=args.verbose,
     )
+    traj_dict = None
     try:
         traj = agent.run(args.user_query)
+        traj_dict = traj.to_dict()
+    except Exception as e:
+        # A crash on step 7 must not cost the six steps that already happened:
+        # the partial transcript is what separates a model mistake from a broken
+        # run. Recorded, then the exception continues on its way.
+        traj_dict = {
+            "question": args.user_query,
+            "steps": [step.to_dict() for step in agent.trajectory_steps],
+            "final_answer": agent.final_answer,
+            "finish_reason": "error",
+            "error": f"{type(e).__name__}: {e}",
+        }
+        raise
     finally:
-        # Retain what the run saw even if it failed partway through.
         recorder.write_manifest()
-    traj_dict = traj.to_dict()
-    prediction = traj_dict.get("final_answer", "")
+        (run_dir / "trajectory.json").write_text(
+            json.dumps(traj_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    prediction = traj_dict.get("final_answer") or ""
 
     print(f"Question: {args.user_query}")
     print(f"Prediction: {prediction}")
 
     (run_dir / "prediction.json").write_text(json.dumps({"prediction": prediction}, ensure_ascii=False, indent=2), encoding="utf-8")
-    (run_dir / "trajectory.json").write_text(json.dumps(traj_dict, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return 0
 

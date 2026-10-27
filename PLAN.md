@@ -4,8 +4,11 @@
 ask Gemini again using the exact images from that run. Produce a small report
 that lets us see what happened. Read [base-research.md](base-research.md) for why.
 
-**Status:** one question (257) run end to end — a valid A run, its metrics, and
-experiment B. Recording verified offline. See Progress for the run table and Next.
+**Status:** the five-question pilot is done and reviewed. The effort cycle (20 new
+ordering questions, three arms, $12 cap) is set up and selected, and no paid call
+has been made for it. Setup found that the frame reader returned frames from the
+wrong moment on most videos, the pilot's included; that is fixed, and its effect on
+the pilot is measured. See "Effort cycle" below.
 
 ## Progress
 
@@ -235,6 +238,119 @@ audit of the remaining questions that checks identifying details, not just recur
 visual types; then scale the batch (20 questions) under the same pre-registered selection.
 Decide the temperature question with the non-determinism already recorded before reading
 larger numbers as stable.
+
+## Effort cycle: setup (2026-10-27)
+
+**The question.** Once the setup is fixed, does more reasoning, or a much simpler
+system, remove the failures? If it does, simplify. If the same human-confirmed failure
+recurs across several new videos, that is the direction. Three arms run on the same 15
+questions, identical code and settings apart from the arm:
+
+| arm | what runs |
+|---|---|
+| medium | the agent, every call at reasoning effort `medium` |
+| high | the agent, every call at `high` |
+| uniform | 128 evenly spaced frames and the question, one call at `high`, no agent (`scripts/uniform_direct.py`) |
+
+Ordering questions only: counting waits for a rule on what counts as a separate scene.
+Temperature stays 1.0, so a single medium/high disagreement can be noise; disagreements
+are re-run once if the budget allows. The pilot's runs used a different configuration and
+are not merged into this table.
+
+**Setup changes, each covered by an offline check (24 checks, no network):**
+
+- **Frames are found by their timestamp.** decord, upstream's reader, jumps to the
+  keyframe before a requested frame and counts forward from it. On many YouTube files
+  the jump lands one keyframe earlier than decord believes, so it returns a frame 1–9s
+  *before* the one asked for, under the later frame's time label, with no error. On
+  the twenty it did this on 14 of 20 videos, for 35 to 225 of 424 requests each
+  (measured on shrunken frames, which also flags a few right frames in still scenes;
+  the other six had at most 7). The tools now read through `videoseek/video.py`
+  (PyAV 19), which decodes forward until a frame's own timestamp is the one
+  requested, so a bad jump costs time, never the wrong frame; where decord was right,
+  the pixels are identical. `check_videos.py` makes 424 frame requests per video in
+  the agent's patterns and requires every frame returned to be byte-identical to the
+  same position in a start-to-finish decode. All 26 videos pass; with decord swapped
+  back in it fails the phone-review video on 65 of 324 frames, and passes the timer
+  tutorial's, where decord was always right. The offline check uses a synthetic clip with
+  open GOPs (frames shown just before a keyframe are decoded after it, as in YouTube
+  encodes), on which decord gets 19 of 128 frames wrong.
+
+- **Workers get the event definitions.** `skim` and `focus` now see the question stem,
+  without the options, beside the planner's query. In the pilot they saw the query alone:
+  the hockey run's "Does Event A or Event B occur right after Event C?" reached its worker
+  with the labels undefined, and other queries dropped identifying clauses.
+- **`skim` follows the configured effort.** Upstream hard-coded it to `low`, so "high"
+  would not have meant every call.
+- **Code snapshot.** `settings.json` records git HEAD, whether the tree was dirty, and a
+  hash of the diff, which is kept beside the run as `code.diff`.
+- **Spending guards.** A run stops before its next call once its estimated cost reaches
+  $1.00 (`max_run_cost_usd`; the pilot's priciest ordering run was $0.17).
+  `scripts/run_cycle.py` starts a run only if spend so far plus $1.00 stays within $12,
+  and stops the cycle if any run's cost could not be priced. These are LiteLLM estimates;
+  the AI Studio dashboard is the bill.
+- **Claimed times** (our measure, not the paper's) in `ves_score.py`: whether the time a
+  run states for each event overlaps that event's interval. It is closer to "found the
+  right moment" than frame coverage, but still not proof of recognition. On the pilot's
+  ordering runs: hockey (q207) 0 of 3, timer tutorial (q150) 3 of 3, floatplane trip
+  (q15) 3 of 3, phone review (q257) 2 of 3, though q257's close-ups near its miss
+  were shown 2.3s early (below).
+
+**Wrong frames in the pilot.** `scripts/audit_sent_frames.py` rebuilds every image a
+run sent from the frames its provenance names, and compares tile by tile with the JPEG
+the model received. Provenance records the frame that was asked for, so where the two
+differ, the model saw an earlier moment under a later label. Frame replays (B) re-sent
+their source run's images and inherit its errors.
+
+| run | frames not the one labelled | how early | what it changes |
+|---|---|---|---|
+| phone review (q257), run 3 | 38 of 128: 15 overview, 23 focus | 1.4–4.4s | Its focus close-ups labelled 12.6–15.0s showed 10.3–12.6s, so no close-up reached Event B (gold 14–18s); only the overview's 15.3–17.9s tiles, which were right, did. Its Event B miss (claimed 10–13s) was partly made on mislabelled frames and is weak evidence about the agent. Run 2: 135 of 576. |
+| floatplane trip (q15), agent | 18 of 96: 10 overview, 8 focus | 1.9–4.7s | Still correct, with 3 of 3 claimed times. |
+| floatplane trip (q15), C | 8 of 48 | 2.6s | 8 of C's "annotated window" frames were from 2.6s before the window. |
+| hockey (q207), agent | 7 of 144: overview and skim only | 0.2–2.1s | The audit's candidates came from focus frames, all correct; its conclusion stands. |
+| q550 (counting), agent | 1 of 80 | 1.5s | Negligible. |
+| timer tutorial (q150), q528 (counting) | 0 | — | Unaffected. |
+
+Each question's first run predates per-image provenance and cannot be audited. Two
+pilot numbers lean on frame labels and should be re-measured before being cited:
+frame coverage and Evidence Precision on the affected runs, which count the frame
+asked for; and "focus windows start +2.8s late on average", because this error shows
+content under labels later than its true time, which is the direction that would make
+an agent aim late.
+
+**The twenty**, from `select_questions.py --set twenty` before any run: five per quartile
+of evidence span, at evenly spaced positions, with the pilot's questions and videos
+excluded. The holdout is the third of every four in span order; it is not run in this
+cycle, and is for checking a fix later, not for exploring.
+
+| q | topic | span | role |
+|---|---|---|---|
+| 6 | news report: police on a bridge, a speech, a figure in a blanket at night | 60s | explore |
+| 215 | bike cleaning: brush, pressure washer, cloth | 90s | explore |
+| 98 | dinosaur documentary | 124s | holdout |
+| 60 | product safety text: chemical labels, lifeline, tilt and turn | 150s | explore |
+| 47 | car promo: grille lights, engine bay, driving away | 162s | explore |
+| 273 | microscopy explainer animation | 164s | explore |
+| 256 | wiring a wall switch: multimeter, terminal screws | 166s | holdout |
+| 181 | car repair under a green car | 167s | explore |
+| 100 | fashion designer profile, leather goods | 170s | explore |
+| 188 | Alex Trebek tribute | 182s | explore |
+| 71 | bike component showcase | 205s | holdout |
+| 185 | election news: ballot counting, a wire fence, an official | 223s | explore |
+| 114 | acrobatic stage performance | 234s | explore |
+| 186 | Puss in Boots film scenes | 253s | explore |
+| 279 | travel show: phone number, sled dogs, sea cliff | 267s | holdout |
+| 9 | college basketball, players told apart by jersey number | 297s | explore |
+| 127 | US passport renewal guide | 326s | explore |
+| 82 | animated story: ghost, planets, a beach | 356s | explore |
+| 69 | sports drama: locker room, desk, gym recovery | 416s | holdout |
+| 153 | cars on city streets: orange sedan, Rolls-Royce | 487s | explore |
+
+**Next:** commit the setup and the selection, so the twenty are on record before any
+result. Then a smoke test of the first and last explore questions in span order, q6
+(news, 60s span) and q153 (cars, 487s span), so it brackets cost, under all three arms:
+about $1–1.5. Check the records, including `audit_sent_frames.py` on each run, then run
+the other 13 on approval.
 
 ## 1. Get the existing agent ready
 

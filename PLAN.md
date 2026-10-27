@@ -4,9 +4,8 @@
 ask Gemini again using the exact images from that run. Produce a small report
 that lets us see what happened. Read [base-research.md](base-research.md) for why.
 
-**Status:** VideoSeek vendored at `vendor/videoseek` (pinned commit from below).
-Environment installed and verified offline. Gemini config prepared but not yet
-exercised against the live API; no research runs yet.
+**Status:** one question (257) run end to end — a valid A run, its metrics, and
+experiment B. Recording verified offline. See Progress for the run table and Next.
 
 ## Progress
 
@@ -112,7 +111,130 @@ Still open:
 1. Decide whether `temperature` stays, given LiteLLM's removal warning.
 2. Then the 5-question and 20-question sets.
 
-**Next:** step 3 — replay the saved images in a fresh request (experiment B).
+
+**Second pass (2026-09-19/21).** A review found the record weaker than it looked. Fixed
+and covered by `scripts/offline_checks.py` — 10 checks, no network, no cost:
+
+- **Frame provenance**: each image records the source frames behind it (indices, unrounded
+  timestamps, grid cell layout), so coverage never depends on re-matching bytes.
+- **Failures are auditable**: attempts, retries and errors reach `events.jsonl` as they
+  happen; a token field the provider omits counts as missing, not zero; a crashed run
+  keeps its transcript, marked `finish_reason: "error"`.
+- **No run-dir races**: the directory is claimed with `exist_ok=False` and passed down as
+  `--run_dir`, not inferred from the output folder afterwards. `pyarrow` is declared.
+
+**Metrics are the benchmark's (§4.3), not invented.** An earlier "Cov@1" here described a
+definition that agreed with the paper only by luck. `scripts/ves_score.py` implements
+Coverage@k (distinct decoded frames per interval, every interval), Evidence Precision
+(macro-averaged), Allocation Ratio (EP / 13.7%) and ECA@k. Conventions it fixes and states:
+closed interval bounds, six-decimal timestamps.
+
+| run (dir suffix) | decoded / supplied | frames per interval | Cov@1/2/3 | EP | AR |
+|---|---|---|---|---|---|
+| `-2` — all `overview` | 64 / 576 | 4, 2, 2 | pass / pass / **fail** | 0.125 | 0.91 |
+| `-3` — valid baseline | 123 / 128 | 9, 11, 8 | pass / pass / pass | 0.228 | 1.66 |
+
+Provenance for both came from `scripts/backfill_provenance.py`, accepted only where the
+re-encoded bytes matched (72/72). The unsuffixed directory is the first, crashed attempt.
+
+**Experiment B: sent twice; both answered `A`** (matching A and the ground truth). The
+second sample recorded cleanly — 72 images digest-verified against A's bytes, 80k in /
+426 out, $0.0617. The first sample's capture was empty from a recorder-wiring bug, since
+fixed and now covered by an offline check over the sending path. On a question A already
+gets right, B agreeing is a control rather than evidence.
+
+## Five questions (2026-09-21)
+
+Chosen by `scripts/select_questions.py` before any answer was looked at. Strata are
+quantiles of the evidence span — first to last annotated interval — within each task, plus
+one positional pick through the question file; questions already run, and videos already
+used, are skipped. Ego4D is excluded because its `video_path` is a bare UUID with no source
+URL, so this pilot is YouTube-only and should be described that way.
+
+| q | task | stratum | span | intervals |
+|---|---|---|---|---|
+| 207 | temporal_ordering | all | 163s | 3 |
+| 15 | temporal_ordering | spread | 358s | 3 |
+| 150 | temporal_ordering | tight | 122s | 3 |
+| 528 | event_counting | all | 290s | 5 |
+| 550 | event_counting | spread | 440s | 4 |
+
+Two mechanical substitutions: q83's video is gone from YouTube, so the next qualifying
+question in its stratum took the place (q150). Videos are fetched video-only — audio is
+never decoded — at the best resolution up to 720p; one arrived at 360x640, and every run
+records its video's frames, fps, duration and pixel size in `question.json`.
+
+`score.json` now also records, per annotated interval, the windowed call that covered it
+and that window's signed start and end shift, so the "aimed early" observation is measured
+rather than felt. It changes nothing about how the agent runs.
+
+## Pilot: the five (2026-09-21)
+
+The first pass was wasted and the reason is worth keeping: the 720p videos had come down as
+VP9-in-mp4, which this decord build cannot decode. Every frame fetch raised, and because a
+raised tool becomes "Tool execution failed." and the run continues, three of the five
+answered from the question text alone while looking like ordinary runs. `q207`, `q15` and
+`q528` are marked `INVALID.md`, kept on disk, and were re-run; `q150` and `q550` ran on
+decodable 360p files and stand.
+
+Fixes, each with an offline check behind it: `scripts/check_videos.py` decodes every video
+the two ways the tools sample it, before any money is spent; the tools coerce the numeric
+parameters this model sometimes sends as strings; a raised tool now records its reason in
+the observation, in `events.jsonl` and in `images.json`, and the runner prints a warning.
+Videos are re-fetched preferring H.264.
+
+**Next:** done — see below.
+
+## Pilot result: A, B and C on the five (2026-09-21)
+
+A got 4/5. The single miss (q207) remains a useful locating-and-verification failure,
+but the visual audit does not establish that the agent found valid alternative instances
+or that the benchmark is wrong. The 538s video received a whole-video overview, a
+10–110s skim, and four detailed focus calls in 12–104s; 3 of its 143 distinct decoded
+frames fell inside the annotated intervals (one per interval). The saved frames show why
+coverage is not enough: the early center-ice candidate appears to have a Ducks puck
+carrier, the 60–61s candidate is at Chicago's net rather than the annotated boards
+battle, and the 96s candidate is behind the net rather than the asserted crease
+scramble. The agent accepted plausible-looking scenes without reliably checking the
+team, player number, puck carrier, or exact play.
+
+B also fails q207, so removing A's reports did not rescue the exact A image set. That is
+a report-removal diagnostic, not proof that the reports were accurate, irrelevant, or
+the sole cause. C returns the key's D with 48 annotated-window images. C shows that the
+answer path works with helpful frames, but it does not establish exactly why; the model
+still had to map the windows to Event A, B, and C. Do not run a timestamp-free shuffled
+C2 for ordering, because removing timestamps removes chronology. See
+`docs/q207-hockey-audit.md` for the evidence and speaker-friendly wording.
+
+| q | gold | A | B | C text |
+|---|---|---|---|---|
+| 207 | D | C ✗ | B ✗ | **D ✓** |
+| 15 | C | C ✓ | C ✓ | C ✓ |
+| 150 | B | B ✓ | B ✓ | B* |
+| 528 | A | A ✓ | A ✓ | A ✓ |
+| 550 | B | B ✓ | B ✓ | B ✓ |
+
+*C's textual answer for q150 is B, but the parser stored it as `null/ambiguous`; fix the
+parser before treating C as a clean 5/5. The parser has since been fixed (a bracketed-letter
+rule), and q150-C's run directory carries `prediction_reparsed.json` with the corrected read,
+its original record left intact. In the four A/B agreements, B's exact-frame
+replay chose the same stored letter with no reports, system prompt, or tools. That is
+agreement, not proof that reports contributed nothing. Coverage and correctness come
+apart both ways (q528 correct with @1 failing; q550 passing @1–@3 with one of four
+intervals targeted). The q257 window-offset hunch **does not replicate**: focus windows
+mean start +2.8s, end +0.1s across the five. The semantic audit also found that q528's
+correct letter hides disagreement about which clips A and B counted, while C can answer
+counting questions by counting its separate annotated image groups.
+
+Spend $1.85 total; A+B+C on the five was $1.59, of which q528 alone $0.49 (20-step
+limit; the cap guard checks between questions, so one long question can overshoot it).
+
+**Next:** fix the C parser and the worker prompt so an event-letter follow-up includes the
+event definitions; resolve the independent-scene rule for q528; run a no-cost ambiguity
+audit of the remaining questions that checks identifying details, not just recurring
+visual types; then scale the batch (20 questions) under the same pre-registered selection.
+Decide the temperature question with the non-determinism already recorded before reading
+larger numbers as stable.
 
 ## 1. Get the existing agent ready
 

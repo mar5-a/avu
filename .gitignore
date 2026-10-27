@@ -17,6 +17,11 @@ output/
 runs/
 data/
 
+# Talk figures and deck. They embed frames from the benchmark videos, which stay
+# out of Git like the other image traces.
+docs/figures/**/*.png
+docs/deck/
+
 # macOS
 .DS_Store
 

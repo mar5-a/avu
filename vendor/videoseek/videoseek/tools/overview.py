@@ -130,4 +130,11 @@ def execute_overview(config: dict, parameters: dict) -> str:
         temperature=config['temperature'],
         return_json=True)
 
-    return "\n\n".join([f"{frame['timestamp']}: {frame['description']}" for frame in json.loads(response.choices[0].message.content)['frames']])
+    reply = response.choices[0].message.content
+    try:
+        return "\n\n".join([f"{frame['timestamp']}: {frame['description']}" for frame in json.loads(reply)['frames']])
+    except Exception:
+        # Re-raised unchanged, so the run goes on exactly as before; the reply is
+        # kept because the parser's message alone does not say what went wrong.
+        recorder.record_unparsed_reply(reply, response.choices[0].finish_reason)
+        raise

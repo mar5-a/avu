@@ -341,6 +341,25 @@ class ImageRecorder:
         )
         self._event("tool_error", tool=tool, error=str(error)[:2000], error_type=error_type)
 
+    def record_unparsed_reply(self, text, finish_reason):
+        """Keep, verbatim, a model reply a tool could not parse.
+
+        In the effort cycle four overview replies failed to parse and only the
+        parser's message survived ("Extra data: line 1 column 12449"), which says
+        where it stopped but not what the model wrote. The text goes to its own
+        file because it runs to tens of thousands of characters.
+        """
+        if not self.active:
+            return
+        name = f"unparsed-step{self._step or 0:02d}-{self._tool or 'call'}.txt"
+        (self.run_dir / name).write_text(text or "", encoding="utf-8")
+        self._event(
+            "unparsed_reply",
+            file=name,
+            chars=None if text is None else len(text),
+            finish_reason=finish_reason,
+        )
+
     def record_step(self, step):
         """Record one agent step as it completes, so a crash keeps the transcript."""
         if not self.active:

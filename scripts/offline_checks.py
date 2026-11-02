@@ -1274,6 +1274,44 @@ def check_reader_returns_frame_asked_for(tmp):
     return f"{total} requests, {3 * (len(keyframes) - 1)} of them just before an open-GOP keyframe, all exact"
 
 
+def check_unparsed_reply_is_kept(tmp):
+    """An overview reply that fails to parse is saved verbatim, and the tool still raises.
+
+    The two failure shapes are the effort cycle's: a complete JSON object with more
+    text after it ("Extra data"), and a list where the object was expected. A reply
+    that parses must leave no file behind.
+    """
+    reader = VideoReader(str(make_test_video(tmp / "clip.mp4")))
+    run_dir = tmp / "run"
+    run_dir.mkdir()
+    recorder.start(run_dir)
+    one_frame = {"timestamp": "1.0s", "description": "x"}
+    replies = [
+        (json.dumps({"frames": [one_frame]}) + ' {"frames": []}', json.JSONDecodeError),
+        (json.dumps([one_frame]), TypeError),
+        (json.dumps({"frames": [one_frame]}), None),
+    ]
+    for step, (reply, expected) in enumerate(replies, start=1):
+        recorder.set_context(step=step, tool="overview")
+        with patch_attr(overview_tool, "call_llm_api", recording_stub(reply)):
+            try:
+                overview_tool.execute_overview(TOOLS_CONFIG, {"vr": reader, "subtitles": []})
+            except Exception as error:  # noqa: BLE001 - which exception is the point
+                assert type(error) is expected, (step, type(error).__name__)
+            else:
+                assert expected is None, f"step {step}: a reply that should not parse was accepted"
+    kept = [event for event in read_events(run_dir) if event["kind"] == "unparsed_reply"]
+    assert [event["step"] for event in kept] == [1, 2], kept
+    for event, (reply, _) in zip(kept, replies):
+        assert event["tool"] == "overview" and event["finish_reason"] == "stop", event
+        assert event["chars"] == len(reply), event
+        assert (run_dir / event["file"]).read_text() == reply, event["file"]
+    assert sorted(path.name for path in run_dir.glob("unparsed-*")) == [
+        "unparsed-step01-overview.txt", "unparsed-step02-overview.txt"
+    ]
+    return "both failure shapes kept verbatim with the same exception raised; a good reply left no file"
+
+
 CHECKS = (
     ("block structure", check_block_structure),
     ("usage accounting", check_usage_unknown_is_not_zero),
@@ -1300,6 +1338,7 @@ CHECKS = (
     ("uniform request", check_uniform_request),
     ("claimed times", check_claimed_times),
     ("reader returns the frame asked for", check_reader_returns_frame_asked_for),
+    ("unparsed reply is kept", check_unparsed_reply_is_kept),
 )
 
 

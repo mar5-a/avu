@@ -257,7 +257,7 @@ Temperature stays 1.0, so a single medium/high disagreement can be noise; disagr
 are re-run once if the budget allows. The pilot's runs used a different configuration and
 are not merged into this table.
 
-**Setup changes, each covered by an offline check (24 checks, no network):**
+**Setup changes, each covered by an offline check (26 checks, no network):**
 
 - **Frames are found by their timestamp.** decord, upstream's reader, jumps to the
   keyframe before a requested frame and counts forward from it. On many YouTube files
@@ -295,6 +295,14 @@ are not merged into this table.
   ordering runs: hockey (q207) 0 of 3, timer tutorial (q150) 3 of 3, floatplane trip
   (q15) 3 of 3, phone review (q257) 2 of 3, though q257's close-ups near its miss
   were shown 2.3s early (below).
+- **Gemini's 503 "high demand" is retried.** Upstream's retry did not recognise it, so
+  the tool crashed on the empty result and the run carried on without that call.
+- **An overview reply that fails to parse is kept** (recording only, from the repeat
+  runs on). In the cycle's first attempts 4 of the 15 medium runs, and none of the 15
+  high ones, lost their overview at step 1 to a reply the JSON parser rejected, and only
+  the parser's message survived. The reply is now written verbatim beside the run
+  (`unparsed-step01-overview.txt`, with an `unparsed_reply` event); the tool still
+  raises the same error, so what the agent sees is unchanged.
 
 **Wrong frames in the pilot.** `scripts/audit_sent_frames.py` rebuilds every image a
 run sent from the frames its provenance names, and compares tile by tile with the JPEG

@@ -1,5 +1,5 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
---- a/config/__init__.py	2026-10-27 22:28:50
+--- a/config/__init__.py	2026-11-02 09:48:23
 +++ b/config/__init__.py	2026-09-19 16:03:40
 @@ -3,7 +3,9 @@
  import argparse
@@ -28,7 +28,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  general_config = load_config(str(CONFIG_DIR / "general.yaml"))
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
---- a/config/general.yaml	2026-10-27 22:28:50
+--- a/config/general.yaml	2026-11-02 09:48:23
 +++ b/config/general.yaml	2026-10-27 22:31:47
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
@@ -55,7 +55,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  frame_sampling_factor: 4
  overview_base: 16
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml	2026-10-27 22:28:50
+--- a/pyproject.toml	2026-11-02 09:48:23
 +++ b/pyproject.toml	2026-10-27 23:13:20
 @@ -9,13 +9,15 @@
  readme = "README.md"
@@ -76,7 +76,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
---- a/videoseek/agent.py	2026-10-27 22:28:50
+--- a/videoseek/agent.py	2026-11-02 09:48:23
 +++ b/videoseek/agent.py	2026-10-27 23:13:16
 @@ -2,11 +2,17 @@
  from typing import List
@@ -231,7 +231,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              question=question,
              steps=self.trajectory_steps,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
---- a/videoseek/cli.py	2026-10-27 22:28:50
+--- a/videoseek/cli.py	2026-11-02 09:48:23
 +++ b/videoseek/cli.py	2026-10-27 22:31:45
 @@ -6,6 +6,7 @@
  
@@ -339,7 +339,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      return 0
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
---- a/videoseek/core/trajectory.py	2026-10-27 22:28:50
+--- a/videoseek/core/trajectory.py	2026-11-02 09:48:23
 +++ b/videoseek/core/trajectory.py	2026-09-19 17:58:19
 @@ -6,16 +6,20 @@
  class TrajectoryStep:
@@ -365,8 +365,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-10-27 22:32:10
-@@ -0,0 +1,419 @@
++++ b/videoseek/recorder.py	2026-11-02 09:48:30
+@@ -0,0 +1,438 @@
 +"""Record exactly what a run sent to the model, so it can be audited and replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
@@ -710,6 +710,25 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        )
 +        self._event("tool_error", tool=tool, error=str(error)[:2000], error_type=error_type)
 +
++    def record_unparsed_reply(self, text, finish_reason):
++        """Keep, verbatim, a model reply a tool could not parse.
++
++        In the effort cycle four overview replies failed to parse and only the
++        parser's message survived ("Extra data: line 1 column 12449"), which says
++        where it stopped but not what the model wrote. The text goes to its own
++        file because it runs to tens of thousands of characters.
++        """
++        if not self.active:
++            return
++        name = f"unparsed-step{self._step or 0:02d}-{self._tool or 'call'}.txt"
++        (self.run_dir / name).write_text(text or "", encoding="utf-8")
++        self._event(
++            "unparsed_reply",
++            file=name,
++            chars=None if text is None else len(text),
++            finish_reason=finish_reason,
++        )
++
 +    def record_step(self, step):
 +        """Record one agent step as it completes, so a crash keeps the transcript."""
 +        if not self.active:
@@ -787,7 +806,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +
 +recorder = ImageRecorder()
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/focus.py b/videoseek/tools/focus.py
---- a/videoseek/tools/focus.py	2026-10-27 22:28:50
+--- a/videoseek/tools/focus.py	2026-11-02 09:48:23
 +++ b/videoseek/tools/focus.py	2026-10-27 22:31:28
 @@ -4,7 +4,12 @@
  import numpy as np
@@ -847,8 +866,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
      response = call_llm_api(
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/overview.py b/videoseek/tools/overview.py
---- a/videoseek/tools/overview.py	2026-10-27 22:28:50
-+++ b/videoseek/tools/overview.py	2026-09-19 19:22:06
+--- a/videoseek/tools/overview.py	2026-11-02 09:48:23
++++ b/videoseek/tools/overview.py	2026-11-02 09:48:26
 @@ -5,6 +5,7 @@
  from PIL import Image
  
@@ -884,8 +903,23 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          model_name=config['model_name'],
          api_base=config['api_base'],
          api_key=config['api_key'],
+@@ -112,4 +130,11 @@
+         temperature=config['temperature'],
+         return_json=True)
+ 
+-    return "\n\n".join([f"{frame['timestamp']}: {frame['description']}" for frame in json.loads(response.choices[0].message.content)['frames']])
+\ No newline at end of file
++    reply = response.choices[0].message.content
++    try:
++        return "\n\n".join([f"{frame['timestamp']}: {frame['description']}" for frame in json.loads(reply)['frames']])
++    except Exception:
++        # Re-raised unchanged, so the run goes on exactly as before; the reply is
++        # kept because the parser's message alone does not say what went wrong.
++        recorder.record_unparsed_reply(reply, response.choices[0].finish_reason)
++        raise
+\ No newline at end of file
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/skim.py b/videoseek/tools/skim.py
---- a/videoseek/tools/skim.py	2026-10-27 22:28:50
+--- a/videoseek/tools/skim.py	2026-11-02 09:48:23
 +++ b/videoseek/tools/skim.py	2026-10-27 22:37:09
 @@ -4,7 +4,12 @@
  import numpy as np
@@ -954,7 +988,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=config["temperature"],
      )
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
---- a/videoseek/utils.py	2026-10-27 22:28:50
+--- a/videoseek/utils.py	2026-11-02 09:48:23
 +++ b/videoseek/utils.py	2026-10-28 00:23:14
 @@ -4,7 +4,9 @@
  import time

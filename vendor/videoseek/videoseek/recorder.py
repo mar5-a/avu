@@ -327,7 +327,7 @@ class ImageRecorder:
         )
 
     def record_tool_error(self, tool, error, error_type):
-        """Record a tool that raised.
+        """Record a tool that raised, or returned nothing.
 
         Without this, a broken tool and a model that chose badly look identical in
         the trajectory: both leave "Tool execution failed." A pilot was run where
@@ -340,6 +340,17 @@ class ImageRecorder:
             {"tool": tool, "error": str(error)[:2000], "error_type": error_type}
         )
         self._event("tool_error", tool=tool, error=str(error)[:2000], error_type=error_type)
+
+    def record_lost_step(self, step, thought):
+        """Record a step that ended without running a tool.
+
+        Gemini sometimes answers the call that turns the thought into a tool call
+        without one. The step then left no step record, only the parser's message on
+        stdout, so a run that lost steps looked like one that took fewer.
+        """
+        if not self.active:
+            return
+        self._event("lost_step", step=step, tool=None, thought=thought)
 
     def record_unparsed_reply(self, text, finish_reason):
         """Keep, verbatim, a model reply a tool could not parse.

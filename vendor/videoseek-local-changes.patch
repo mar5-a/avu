@@ -1,5 +1,5 @@
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__init__.py b/config/__init__.py
---- a/config/__init__.py	2026-11-02 09:48:23
+--- a/config/__init__.py	2026-11-02 12:13:31
 +++ b/config/__init__.py	2026-09-19 16:03:40
 @@ -3,7 +3,9 @@
  import argparse
@@ -28,7 +28,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/__i
  general_config = load_config(str(CONFIG_DIR / "general.yaml"))
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/general.yaml b/config/general.yaml
---- a/config/general.yaml	2026-11-02 09:48:23
+--- a/config/general.yaml	2026-11-02 12:13:31
 +++ b/config/general.yaml	2026-10-27 22:31:47
 @@ -1,7 +1,9 @@
 -model_name: "gpt-5"
@@ -55,7 +55,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/config/gen
  frame_sampling_factor: 4
  overview_base: 16
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.toml b/pyproject.toml
---- a/pyproject.toml	2026-11-02 09:48:23
+--- a/pyproject.toml	2026-11-02 12:13:31
 +++ b/pyproject.toml	2026-10-27 23:13:20
 @@ -9,13 +9,15 @@
  readme = "README.md"
@@ -76,8 +76,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/pyproject.
  
  [project.scripts]
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/agent.py b/videoseek/agent.py
---- a/videoseek/agent.py	2026-11-02 09:48:23
-+++ b/videoseek/agent.py	2026-10-27 23:13:16
+--- a/videoseek/agent.py	2026-11-02 12:13:31
++++ b/videoseek/agent.py	2026-11-02 12:14:18
 @@ -2,11 +2,17 @@
  from typing import List
  from abc import ABC, abstractmethod
@@ -123,7 +123,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          except Exception as e:
              print(f"Error parsing actions: {e}")
              return []
-@@ -150,7 +162,13 @@
+@@ -150,13 +162,25 @@
          if function_name == "answer":
              parameters = {"question": self.question, "messages": self.messages}
          else:
@@ -138,7 +138,19 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          
          if self.tool_registry.has_tool(function_name):
              outcome = self.tool_registry.get_function(function_name)(
-@@ -220,7 +238,7 @@
+                 config=self.config, parameters=parameters
+             )
+             if outcome is None:
++                # The tools return the model's reply text, which is None when Gemini's
++                # reply has none. Only the observation said so: the record showed no
++                # tool error, and the run passed as clean.
++                recorder.record_tool_error(
++                    tool=function_name, error="the tool returned None", error_type="NoOutput"
++                )
+                 outcome = "Tool execution failed."
+             return outcome
+         else:
+@@ -220,7 +244,7 @@
                  seed=self.seed,
                  temperature=self.temperature,
              )
@@ -147,7 +159,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              # thought = """I will use the `overview` tool next to get a 32-frame summary of the entire video, so I can (1) locate where the visit to TeamLab Planets happens in the timeline and (2) see what location appears immediately afterward. This will guide which narrower time segment to inspect with `skim` or `focus` in later steps."""
              self.messages.append({"role": "assistant", "content": thought})
              if self.verbose:
-@@ -243,7 +261,9 @@
+@@ -243,7 +267,9 @@
                          "type": "function",
                          "function": {
                              "name": action.function_name,
@@ -158,7 +170,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                          },
                      }
                      for action in actions
-@@ -253,10 +273,23 @@
+@@ -253,10 +279,23 @@
              # OBSERVATIONS
              ############################################################
              for action in actions:
@@ -183,7 +195,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  if self.verbose:
                      print(f"[STEP {step+1} / {self.max_steps}] OBSERVATION")
                      print(outcome)
-@@ -265,14 +298,18 @@
+@@ -265,14 +304,18 @@
                  if action.parameters is not None:
                      action.parameters.pop("vr", None)
                      action.parameters.pop("subtitles", None)
@@ -209,7 +221,15 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                  if action.function_name == "answer":
                      self.final_answer = observation.outcome
                      break
-@@ -324,8 +361,11 @@
+@@ -285,6 +328,7 @@
+                 )
+             
+             if len(actions) == 0:
++                recorder.record_lost_step(step + 1, thought)
+                 self.messages.append(
+                     {
+                         "role": "user",
+@@ -324,8 +368,11 @@
                  seed=self.seed,
                  temperature=self.temperature,
              )
@@ -222,7 +242,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              return Trajectory(
                  question=question,
                  steps=self.trajectory_steps,
-@@ -333,6 +373,7 @@
+@@ -333,6 +380,7 @@
                  finish_reason="reach_max_steps",
              )
  
@@ -231,7 +251,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
              question=question,
              steps=self.trajectory_steps,
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/cli.py b/videoseek/cli.py
---- a/videoseek/cli.py	2026-11-02 09:48:23
+--- a/videoseek/cli.py	2026-11-02 12:13:31
 +++ b/videoseek/cli.py	2026-10-27 22:31:45
 @@ -6,6 +6,7 @@
  
@@ -339,7 +359,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      return 0
  
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/core/trajectory.py b/videoseek/core/trajectory.py
---- a/videoseek/core/trajectory.py	2026-11-02 09:48:23
+--- a/videoseek/core/trajectory.py	2026-11-02 12:13:31
 +++ b/videoseek/core/trajectory.py	2026-09-19 17:58:19
 @@ -6,16 +6,20 @@
  class TrajectoryStep:
@@ -365,8 +385,8 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          }
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/recorder.py b/videoseek/recorder.py
 --- a/videoseek/recorder.py	1970-01-01 03:00:00
-+++ b/videoseek/recorder.py	2026-11-02 09:48:30
-@@ -0,0 +1,438 @@
++++ b/videoseek/recorder.py	2026-11-02 12:14:20
+@@ -0,0 +1,449 @@
 +"""Record exactly what a run sent to the model, so it can be audited and replayed.
 +
 +Every model call goes through `utils.call_llm_api`, which makes that the single
@@ -696,7 +716,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        )
 +
 +    def record_tool_error(self, tool, error, error_type):
-+        """Record a tool that raised.
++        """Record a tool that raised, or returned nothing.
 +
 +        Without this, a broken tool and a model that chose badly look identical in
 +        the trajectory: both leave "Tool execution failed." A pilot was run where
@@ -709,6 +729,17 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +            {"tool": tool, "error": str(error)[:2000], "error_type": error_type}
 +        )
 +        self._event("tool_error", tool=tool, error=str(error)[:2000], error_type=error_type)
++
++    def record_lost_step(self, step, thought):
++        """Record a step that ended without running a tool.
++
++        Gemini sometimes answers the call that turns the thought into a tool call
++        without one. The step then left no step record, only the parser's message on
++        stdout, so a run that lost steps looked like one that took fewer.
++        """
++        if not self.active:
++            return
++        self._event("lost_step", step=step, tool=None, thought=thought)
 +
 +    def record_unparsed_reply(self, text, finish_reason):
 +        """Keep, verbatim, a model reply a tool could not parse.
@@ -806,7 +837,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +
 +recorder = ImageRecorder()
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/focus.py b/videoseek/tools/focus.py
---- a/videoseek/tools/focus.py	2026-11-02 09:48:23
+--- a/videoseek/tools/focus.py	2026-11-02 12:13:31
 +++ b/videoseek/tools/focus.py	2026-10-27 22:31:28
 @@ -4,7 +4,12 @@
  import numpy as np
@@ -866,7 +897,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
      response = call_llm_api(
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/overview.py b/videoseek/tools/overview.py
---- a/videoseek/tools/overview.py	2026-11-02 09:48:23
+--- a/videoseek/tools/overview.py	2026-11-02 12:13:31
 +++ b/videoseek/tools/overview.py	2026-11-02 09:48:26
 @@ -5,6 +5,7 @@
  from PIL import Image
@@ -919,7 +950,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +        raise
 \ No newline at end of file
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/tools/skim.py b/videoseek/tools/skim.py
---- a/videoseek/tools/skim.py	2026-11-02 09:48:23
+--- a/videoseek/tools/skim.py	2026-11-02 12:13:31
 +++ b/videoseek/tools/skim.py	2026-10-27 22:37:09
 @@ -4,7 +4,12 @@
  import numpy as np
@@ -988,19 +1019,38 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=config["temperature"],
      )
 diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/utils.py b/videoseek/utils.py
---- a/videoseek/utils.py	2026-11-02 09:48:23
-+++ b/videoseek/utils.py	2026-10-28 00:23:14
-@@ -4,7 +4,9 @@
+--- a/videoseek/utils.py	2026-11-02 12:13:31
++++ b/videoseek/utils.py	2026-11-02 12:12:59
+@@ -2,9 +2,28 @@
+ import random
+ import re
  import time
++import httpx
  from litellm import completion
  
 +from .recorder import recorder
  
 +
++def _failed_in_transit(error):
++    """Whether the call died on the network: no connection, or the reply was cut off.
++
++    LiteLLM wraps these in APIConnectionError, which is also its catch-all for
++    errors it does not recognise; retrying one of those only repeats it. The httpx
++    error it was raised while handling is what says the network was at fault, and
++    unlike the message ("nodename nor servname provided" on macOS, "Name or service
++    not known" on Linux) it does not depend on the operating system.
++    """
++    while error is not None:
++        if isinstance(error, (httpx.NetworkError, httpx.RemoteProtocolError)):
++            return True
++        error = error.__cause__ or error.__context__
++    return False
++
++
  def retry_with_exponential_backoff(
      func,
      initial_delay: float = 1,
-@@ -18,6 +20,7 @@
+@@ -18,6 +37,7 @@
          # Initialize variables
          num_retries = 0
          delay = initial_delay
@@ -1008,7 +1058,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
  
          # Loop until a successful response or max_retries is hit or an exception is raised
          while True:
-@@ -34,21 +37,46 @@
+@@ -34,21 +54,49 @@
                      or "server had an error" in str(e).lower()
                      or "has no attribute 'upper'" in str(e).lower()
                      or "internal" in str(e).lower()
@@ -1016,6 +1066,9 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
 +                    # (status UNAVAILABLE): upstream gave up at once, the tool
 +                    # crashed on the None, and the run carried on without it.
 +                    or "unavailable" in str(e).lower()
++                    # A dropped connection: a failed DNS lookup ended a cycle run
++                    # on its first call, which upstream did not retry.
++                    or _failed_in_transit(e)
                  ):
                      # Increment retries
                      num_retries += 1
@@ -1055,7 +1108,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
                      print(str(e))
                      return None
  
-@@ -56,7 +84,7 @@
+@@ -56,7 +104,7 @@
  
  
  @retry_with_exponential_backoff
@@ -1064,7 +1117,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
      model_name: str,
      messages: list,
      api_base: str,
-@@ -70,14 +98,13 @@
+@@ -70,14 +118,13 @@
      tool_choice: str = None,
      return_json: bool = False,
  ) -> dict:
@@ -1080,7 +1133,7 @@ diff -ruN --exclude=.git --exclude=__pycache__ --exclude=*.egg-info a/videoseek/
          temperature=temperature,
          reasoning_effort=reasoning_effort,
          tools=tools,
-@@ -85,6 +112,67 @@
+@@ -85,6 +132,67 @@
          response_format={"type": "json_object"} if return_json else None,
          timeout=900,
      )

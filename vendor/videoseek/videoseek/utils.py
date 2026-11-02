@@ -2,9 +2,26 @@ import os
 import random
 import re
 import time
+import httpx
 from litellm import completion
 
 from .recorder import recorder
+
+
+def _failed_in_transit(error):
+    """Whether the call died on the network: no connection, or the reply was cut off.
+
+    LiteLLM wraps these in APIConnectionError, which is also its catch-all for
+    errors it does not recognise; retrying one of those only repeats it. The httpx
+    error it was raised while handling is what says the network was at fault, and
+    unlike the message ("nodename nor servname provided" on macOS, "Name or service
+    not known" on Linux) it does not depend on the operating system.
+    """
+    while error is not None:
+        if isinstance(error, (httpx.NetworkError, httpx.RemoteProtocolError)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 def retry_with_exponential_backoff(
@@ -41,6 +58,9 @@ def retry_with_exponential_backoff(
                     # (status UNAVAILABLE): upstream gave up at once, the tool
                     # crashed on the None, and the run carried on without it.
                     or "unavailable" in str(e).lower()
+                    # A dropped connection: a failed DNS lookup ended a cycle run
+                    # on its first call, which upstream did not retry.
+                    or _failed_in_transit(e)
                 ):
                     # Increment retries
                     num_retries += 1

@@ -257,7 +257,7 @@ Temperature stays 1.0, so a single medium/high disagreement can be noise; disagr
 are re-run once if the budget allows. The pilot's runs used a different configuration and
 are not merged into this table.
 
-**Setup changes, each covered by an offline check (26 checks, no network):**
+**Setup changes, each covered by an offline check (28 checks, no network):**
 
 - **Frames are found by their timestamp.** decord, upstream's reader, jumps to the
   keyframe before a requested frame and counts forward from it. On many YouTube files
@@ -303,6 +303,20 @@ are not merged into this table.
   the parser's message survived. The reply is now written verbatim beside the run
   (`unparsed-step01-overview.txt`, with an `unparsed_reply` event); the tool still
   raises the same error, so what the agent sees is unchanged.
+- **A dropped connection is retried.** The bike-cleaning run at high effort (q215,
+  repeat attempt) died on its first call when a DNS lookup failed, and upstream gave up
+  at once. A call is now retried when the error arose from an httpx network failure.
+  LiteLLM's `APIConnectionError` alone is not enough, because it is also LiteLLM's
+  catch-all for errors it does not recognise, and retrying those would only repeat them.
+- **An empty Gemini reply is recorded** (recording only). In the Darfur repeat at
+  medium (q185), two replies held nothing the agent could use. The step-3 tool choice
+  came back without a tool call, and the step vanished from the record. The step-15
+  focus on 525–540 s, right on Event C (536–540 s), came back with no text; it reached
+  the model as "Tool execution failed." but left no tool error. Now a lost step writes
+  a `lost_step` event with its thought, and a tool that returns nothing writes a
+  `NoOutput` tool error. What the model is told is unchanged. Scoring still counts the
+  empty focus's frames as seen. A usage record of 0 completion tokens is not a sign of
+  an empty reply: that run reports it on 5 calls, 3 of which returned text.
 
 **Wrong frames in the pilot.** `scripts/audit_sent_frames.py` rebuilds every image a
 run sent from the frames its provenance names, and compares tile by tile with the JPEG

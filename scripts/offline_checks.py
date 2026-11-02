@@ -16,6 +16,7 @@ import contextlib
 import hashlib
 import json
 import shutil
+import socket
 import subprocess
 import sys
 import traceback
@@ -1312,6 +1313,125 @@ def check_unparsed_reply_is_kept(tmp):
     return "both failure shapes kept verbatim with the same exception raised; a good reply left no file"
 
 
+def check_connection_drop_is_retried(tmp):
+    """A dropped connection is retried; LiteLLM's catch-all error still is not.
+
+    The DNS failure is produced for real, by making name lookup fail, so the error
+    retried is the one LiteLLM builds rather than one written to look like it. With
+    no name lookup, no request can leave the machine.
+    """
+    recorder.start(tmp)
+
+    def no_dns(*args, **kwargs):
+        # What ended the bike-cleaning run at high effort on 2026-11-02.
+        raise socket.gaierror(8, "nodename nor servname provided, or not known")
+
+    with patch_attr(socket, "getaddrinfo", no_dns), patch_attr(utils.time, "sleep", lambda s: None):
+        response = call_llm_api(
+            model_name="gemini/gemini-3.8-flash", api_base=None,
+            api_key="offline-check-not-a-key", messages=[{"role": "user", "content": "hi"}],
+        )
+    assert response is None, "a call succeeded with name lookup disabled"
+    attempts = [e for e in read_events(tmp) if e["kind"] == "attempt"]
+    assert [e["status"] for e in attempts] == ["retry"] * 8 + ["gave_up"], attempts
+    assert attempts[0]["error_type"] == "APIConnectionError", attempts[0]
+    assert "nodename nor servname" in attempts[0]["error"], attempts[0]
+
+    def unrecognised(*args, **kwargs):
+        # How LiteLLM reports an error it has no mapping for: raised while
+        # handling it, under the same class a dropped connection gets.
+        try:
+            None.get
+        except AttributeError as error:
+            raise litellm.APIConnectionError(
+                message=f"GeminiException - {error}",
+                llm_provider="gemini",
+                model="gemini/gemini-3.8-flash",
+            )
+
+    with patch_attr(utils, "completion", unrecognised):
+        assert call_llm_api(
+            model_name="gemini/gemini-3.8-flash", api_base=None,
+            messages=[{"role": "user", "content": "hi"}],
+        ) is None
+    attempts = [e for e in read_events(tmp) if e["kind"] == "attempt"]
+    assert [e["status"] for e in attempts[9:]] == ["failed"], attempts[9:]
+    return "a failed DNS lookup retried 8 times, then given up; an unrecognised error failed at once"
+
+
+def check_empty_replies_are_recorded(tmp):
+    """An empty Gemini reply leaves a mark in the record, wherever it lands.
+
+    Both cases come from one repeat run of the Darfur question. Its tool choice at
+    step 3 came back with no tool call and the step vanished; its focus on 525-540 s
+    came back with no text and the record showed no error. What the model is told
+    stays as it was.
+    """
+    video = make_test_video(tmp / "clip.mp4")
+    run_dir = tmp / "run"
+    focus_arguments = json.dumps({"query": "What is shown?", "start_time": 1.0, "end_time": 2.0})
+    empty = dict(usage=fake_usage(completion=0))
+    scripted = [
+        fake_response(content="I will inspect the middle of the clip.", usage=fake_usage()),
+        fake_response(**empty),
+        fake_response(content="I will inspect the middle of the clip again.", usage=fake_usage()),
+        fake_response(
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "focus", "arguments": focus_arguments},
+                }
+            ],
+            finish_reason="tool_calls",
+            usage=fake_usage(),
+        ),
+        fake_response(**empty),
+        fake_response(content="I can answer now.", usage=fake_usage()),
+        fake_response(
+            tool_calls=[
+                {
+                    "id": "call_2",
+                    "type": "function",
+                    "function": {"name": "answer", "arguments": "{}"},
+                }
+            ],
+            finish_reason="tool_calls",
+            usage=fake_usage(),
+        ),
+        fake_response(content="A", usage=fake_usage()),
+    ]
+
+    def scripted_completion(*args, **kwargs):
+        assert scripted, "the agent asked for more responses than the script provides"
+        return scripted.pop(0)
+
+    with patch_attr(utils, "completion", scripted_completion):
+        cli_main(
+            [
+                "--video_path", str(video),
+                "--user_query", "What colour is the pattern?\n(A) red\n(B) blue\n",
+                "--output_dir", str(tmp),
+                "--run_dir", str(run_dir),
+            ]
+        )
+
+    events = read_events(run_dir)
+    lost = [e for e in events if e["kind"] == "lost_step"]
+    assert [(e["step"], e["tool"]) for e in lost] == [(1, None)], lost
+    assert lost[0]["thought"] == "I will inspect the middle of the clip.", lost[0]
+    trajectory = json.loads((run_dir / "trajectory.json").read_text())
+    assert [s["step_id"] for s in trajectory["steps"]] == [2, 3], trajectory["steps"]
+    observation = trajectory["steps"][0]["observation"]
+    assert observation.endswith("]:\nTool execution failed."), observation
+    manifest = json.loads((run_dir / "images.json").read_text())
+    assert manifest["tool_errors"] == [
+        {"tool": "focus", "error": "the tool returned None", "error_type": "NoOutput"}
+    ], manifest["tool_errors"]
+    assert [e["step"] for e in events if e["kind"] == "tool_error"] == [2]
+    return "lost step 1 recorded with its thought; empty focus at step 2 recorded, observation unchanged"
+
+
 CHECKS = (
     ("block structure", check_block_structure),
     ("usage accounting", check_usage_unknown_is_not_zero),
@@ -1339,6 +1459,8 @@ CHECKS = (
     ("claimed times", check_claimed_times),
     ("reader returns the frame asked for", check_reader_returns_frame_asked_for),
     ("unparsed reply is kept", check_unparsed_reply_is_kept),
+    ("connection drop is retried", check_connection_drop_is_retried),
+    ("empty replies are recorded", check_empty_replies_are_recorded),
 )
 
 

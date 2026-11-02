@@ -175,6 +175,12 @@ class VideoSeekAgent(BaseAgent):
                 config=self.config, parameters=parameters
             )
             if outcome is None:
+                # The tools return the model's reply text, which is None when Gemini's
+                # reply has none. Only the observation said so: the record showed no
+                # tool error, and the run passed as clean.
+                recorder.record_tool_error(
+                    tool=function_name, error="the tool returned None", error_type="NoOutput"
+                )
                 outcome = "Tool execution failed."
             return outcome
         else:
@@ -322,6 +328,7 @@ class VideoSeekAgent(BaseAgent):
                 )
             
             if len(actions) == 0:
+                recorder.record_lost_step(step + 1, thought)
                 self.messages.append(
                     {
                         "role": "user",

@@ -4,9 +4,10 @@
 ask Gemini again using the exact images from that run. Produce a small report
 that lets us see what happened. Read [base-research.md](base-research.md) for why.
 
-**Status:** the five-question pilot is done and reviewed. The effort cycle (20 new
-ordering questions, three arms, $12 cap) is set up and selected, and no paid call
-has been made for it. Setup found that the frame reader returned frames from the
+**Status:** the five-question pilot and the effort cycle are done. The cycle ran its
+15 explore ordering questions under three arms, then repeated the medium/high
+disagreements and the medium runs that had lost their overview: 54 runs, $9.71 of the
+$12 cap by the ledger. Setup found that the frame reader returned frames from the
 wrong moment on most videos, the pilot's included; that is fixed, and its effect on
 the pilot is measured. See "Effort cycle" below.
 
@@ -368,11 +369,136 @@ cycle, and is for checking a fix later, not for exploring.
 | 69 | sports drama: locker room, desk, gym recovery | 416s | holdout |
 | 153 | cars on city streets: orange sedan, Rolls-Royce | 487s | explore |
 
-**Next:** commit the setup and the selection, so the twenty are on record before any
-result. Then a smoke test of the first and last explore questions in span order, q6
-(news, 60s span) and q153 (cars, 487s span), so it brackets cost, under all three arms:
-about $1–1.5. Check the records, including `audit_sent_frames.py` on each run, then run
-the other 13 on approval.
+**Next:** done — see below.
+
+## Effort cycle: results (2026-11-02)
+
+All 45 planned runs (15 explore questions × 3 arms) and 9 repeats finished. Every
+record was checked: committed code with nothing uncommitted (`b4746d0` for the 45,
+`66364b0` for the first 8 repeats, `3286b55` for the bike-cleaning re-run at high), the
+arm's effort on every call, temperature 1.0, no failed or unpriced calls, no retries.
+`audit_sent_frames.py`, re-run over all 54 for this write-up, found no wrong frame
+among the 6,336 frame tiles the 45 sent or the 1,744 the repeats sent; its only flags
+are false alarms on one noisy video (below).
+The ledger total is $9.71 of $12. Another $0.14 went to four runs stopped before they
+finished, three of the cycle's and the hockey re-run; each is marked `INVALID.md` and
+is outside the ledger. The bike-cleaning run at high that died on a DNS failure ($0)
+is marked too, and its row is in `ledger-invalid.jsonl`.
+
+**Smoke test first.** q6 (news report) and q153 (cars at night) under all three arms:
+6 of 6 correct, and 0 of the 640 frames sent were wrong, on two of decord's worst
+videos (112 and 150 of 424 test requests had come back from the wrong moment). Agent
+runs cost $0.05–0.15 and a uniform run about $0.11 (128 frames, about 141k input
+tokens), which set the projection for the other 13 questions at about $4.
+
+**Accuracy by arm, first attempts:**
+
+| | medium | high | uniform |
+|---|---|---|---|
+| correct, of 15 | 12 | 13 | 14 |
+| coverage@1 (a frame inside every event's window), of 15 | 14 | 13 | 13 |
+| mean cost per run | $0.15 | $0.23 | $0.12 |
+
+The arms differ by one question each, which is within noise at 15. The single uniform
+call was at least as accurate as the agent, at about half the cost of high effort.
+
+**The six wrong first attempts: five had the right frames.** In five, at least one
+frame from inside every event's window was sent, and the run accepted a similar-looking
+moment elsewhere as the event without looking for a second candidate:
+
+- Bike cleaning (q215), medium, took the hose rinse at 28 s as Event B, the water gun
+  on the cassette and brake disc (gold 115–122 s). For Event B it skimmed 20–38 s and
+  focused on 25–30 s; its overview had listed a second rinse at 117 s, never examined.
+- Firebird car promo (q47), medium, took a title-sequence acceleration at 18–20 s as
+  Event C (gold 116–122 s). On its last step it placed Event A at 22–30 s with no frame
+  behind it ("Often in this show, they put digital glowing lines…"), though 3 frames
+  from Event A's window (46–50 s) had been sent.
+- Firebird (q47), high, placed the engine-bay label (Event B) right at 203 s but took
+  a later acceleration at 216 s as Event C, and put Event A in the title sequence from
+  expectation ("My experience tells me…").
+- Car repair under a green Dodge Challenger (q181), medium, placed the person lying
+  under the car with a wrench (Event A) at 97–100 s; gold is 201–209 s.
+- College basketball (q9), high, placed the Louisville layup (Event C) at 27 s and the
+  Boston College three (Event A) at 33–35 s, earlier plays in the same game; gold is
+  122–129 s and 333–339 s.
+
+One was missing evidence: Darfur election news (q185), uniform. On the 882 s video,
+128 frames are 6.9 s apart; Event C's window (536–540 s) is 4 s wide, and no frame
+landed in it. The model saw Event B at 576.5 s and placed Event C after it, "around
+580s-620s… likely". (Claimed times record 368 s for its Event C, an earlier mention in
+its reasoning, not its placement.)
+
+**Repeats.** By the setup's rule, the medium/high disagreements were re-run once: q215,
+q181 and q9 at both efforts. So were the three other medium runs that had lost their
+overview (below), so each of those questions has a medium run that started normally.
+
+| question | arm | attempt 1 | attempt 2 | where the runs placed the events |
+|---|---|---|---|---|
+| bike cleaning (q215) | medium | ✗ | ✗ | Event B at 28 s both times (gold 115–122 s) |
+| | high | ✓ | ✓ | attempt 1: Event B at 119 s; attempt 2 stated no times, its Event B focus was 116–127 s |
+| Dodge Challenger (q181) | medium | ✗ | ✓ | Event A at 97–100 s, then 120–128 s (gold 201–209 s) |
+| | high | ✓ | ✓ | Event A at 120–125 s, then 160–175 s |
+| basketball (q9) | medium | ✓ | ✗ | across the four runs, 11 of 12 stated times 19–300 s off; the twelfth 1 s off |
+| | high | ✗ | ✓ | |
+| microscopy (q273) | medium | ✓ | ✓ | overview lost on attempt 1, parsed on attempt 2 |
+| Darfur (q185) | medium | ✓ | ✓ | same |
+| acrobatics (q114) | medium | ✓ | ✓ | same |
+
+Only the bike-cleaning split held. Medium settled twice on the first rinse that fit,
+and high placed Event B right twice: attempt 1 by comparing the two rinses, attempt 2
+by going straight to 116–127 s. The saved frames back the key. At 28.5 s is a wide
+shot of hosing from behind; at 116–119 s is the close-up of the gun misting the
+cassette and disc that Event B describes. Two runs per arm make this a pattern, not a
+measured effect. q181 and q9 flipped on luck. Every q181 run misplaced Event A, and the
+order came out right whenever the wrong placement still fell after Event B (114–119 s).
+q9's runs placed no play inside its window, so its answers are close to chance. The three medium
+questions re-run for their overview were right both with and without it.
+
+**Right answers with wrong placements.** 12 of the 39 correct first attempts placed at
+least one event more than 10 s outside its window, and 2 stated no times; of the 7
+correct repeats, 3 and 1. q9 medium got the order right with all three times wrong, by
+30, 86 and 225 s. Claimed times have zero tolerance, so they partly measure sampling
+density: q153's uniform run was right with each event 0.9–3.2 s outside its window,
+its frames being 5.25 s apart. Whether to report the gap in seconds, or allow about one
+frame spacing, is undecided.
+
+**Problems found:**
+
+- **Overviews that failed to parse.** 4 of the 15 medium first attempts (q273, q185,
+  q114, q9) lost their overview at step 1 to a reply the parser rejected about
+  12,400–13,300 characters in: two had text after a complete JSON object, one was
+  malformed, one was a list. None of the 15 high runs did. All four still answered
+  right. None of the 6 medium repeats failed, so overall it is 4 of 21 medium runs and
+  0 of 18 high, a weaker link to effort than the first split suggested. A failed reply
+  is now kept (setup, above).
+- **Cost ran 70% over projection:** $6.88 for the 39 runs after the smoke test,
+  against about $4. Four runs answered at or one step short of the 20-step limit,
+  Firebird (q47) and Darfur (q185) at both efforts, and together cost $2.40. The
+  bike-cleaning re-run at high cost $0.465 against $0.167 the first time: 17 steps,
+  about 12 of them hunting the brush scrub (Event A, 52–58 s).
+- **The ledger may run low.** Some calls report 0 output tokens though they returned
+  text (5 such reports in the Darfur medium repeat, 3 of them with text). Comparing the
+  ledger with the AI Studio bill once would settle by how much.
+- **Audit false alarms on the acrobatics video (q114).** All 43 flagged tiles are
+  on this video: 34 across its three first attempts, 9 in its medium repeat. For each,
+  the closest frame is the one it was labelled with, at a distance of 6.1–7.1 against
+  the tolerance of 6.0, while frames a second away score 11–110. The video is noisier
+  under JPEG than the tolerance allows; no frame was wrong.
+- **An empty focus still counts as seen.** In the Darfur medium repeat, the focus on
+  525–540 s returned no text (now recorded; setup, above), but scoring still counts
+  its frames, so that run's Event C coverage is overstated.
+
+**What it says.** In 5 of the 6 wrong first attempts the frames from the right moment
+were sent, and the failure was accepting the first plausible match. The one effort
+effect that survived its repeat, bike cleaning, is that failure at medium avoided at
+high. Uniform sampling's one miss came where an event's window was narrower than its
+frame spacing. On this set that points toward mis-using evidence over missing it; with 15
+questions, it is a pattern to test, not a result.
+
+**Next, open for decision:** a tolerance for claimed times, or reporting gaps in
+seconds; the audit tolerance for noisy videos; comparing the ledger with the AI Studio
+bill; the hockey (q207) re-run at high effort, stopped on 2026-10-27; and what to test
+next, with the holdout five kept for checking a fix.
 
 ## 1. Get the existing agent ready
 
